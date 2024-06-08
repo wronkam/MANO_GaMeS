@@ -47,3 +47,23 @@ class OptimizationParamsFlame(ParamGroup):
         self.use_mesh = True
         self.lambda_dssim = 0.2
         super().__init__(parser, "Optimization Parameters")
+
+# TODO: fill and try to overwrite with arg file to load mano, add scale (around mean) and trans from GS+MANO
+class OptimizationParamsMano(ParamGroup):
+    def __init__(self, parser):
+        self.iterations = 30_000
+        self.alpha_lr = 0.001
+        self.feature_lr = 0.0025
+        self.opacity_lr = 0.05
+        self.scaling_lr = 0.005
+        self.rotation_lr = 0.001
+        self.mano_shape_lr = 0.01
+        self.mano_scale_lr = 0.001
+        self.mano_pose_lr = 0.001
+        self.mano_rot_lr = 0.001
+        self.mano_transl_lr = 0.001
+        self.vertices_enlargement_lr = 0.00002
+        self.random_background = False
+        self.use_mesh = True
+        self.lambda_dssim = 0.2
+        super().__init__(parser, "Optimization Parameters")

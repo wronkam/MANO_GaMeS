@@ -10,11 +10,20 @@
 #
 
 import os
+
+import cv2
+import numpy as np
 import torch
 from random import randint
+
+import torchvision
+from matplotlib import pyplot as plt
+
+from games.mano_splatting.scene.gaussian_mano_model import GaussianManoModel
+from utils.general_utils import plt_scatter
 from utils.loss_utils import l1_loss, ssim
 from renderer.gaussian_renderer import render, network_gui
-import sys
+import sys, math
 from scene import Scene
 from games import (
     optimizationParamTypeCallbacks,
@@ -23,7 +32,7 @@ from games import (
 
 from utils.general_utils import safe_state
 import uuid
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams
@@ -37,7 +46,7 @@ except ImportError:
 
 
 def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint,
-             debug_from, save_xyz):
+             debug_from, save_xyz,args=None):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = gaussianModel[gs_type](dataset.sh_degree)
@@ -54,21 +63,28 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
 
+    if args.test_every_n is not None:
+        print(f"Testing every {args.test_every_n} iteration")
+        testing_iterations = sorted(list(set(
+                            list(range(args.test_every_n,opt.iterations+1,args.test_every_n))
+                            + testing_iterations)))
+    print("testing at:",testing_iterations)
+
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    progress_bar = tqdm(range(opt.iterations), desc="Training progress",initial=first_iter)
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         os.makedirs(f"{scene.model_path}/xyz", exist_ok=True)
         if save_xyz and (iteration % 5000 == 1 or iteration == opt.iterations):
             torch.save(gaussians.get_xyz, f"{scene.model_path}/xyz/{iteration}.pt")
-        if network_gui.conn == None:
+        if network_gui.conn is None:
             network_gui.try_connect()
-        while network_gui.conn != None:
+        while network_gui.conn is not None:
             try:
                 net_image_bytes = None
                 custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
-                if custom_cam != None:
+                if custom_cam is not None:
                     net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer)["render"]
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2,
                                                                                                                0).contiguous().cpu().numpy())
@@ -105,6 +121,13 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+        if "GaussianManoModel" in str(type(gaussians)):
+            if args.scale_loss:
+                scale_loss_iters = gaussians.point_cloud.mano_model.scale_loss
+                loss_scale = torch.max(gaussians.get_scaling)#torch.log2(torch.nn.functional.relu(gaussians._vertices_enlargement) + 1 + 1e-8)
+                print(loss,loss_scale)
+                loss = loss + loss_scale * math.log2(1+1e-6+iteration/(opt.iterations*scale_loss_iters))
         loss.backward()
 
         iter_end.record()
@@ -120,7 +143,7 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
-                            testing_iterations, scene, render, (pipe, background))
+                            testing_iterations, scene, render, (pipe, background),gaussians,progress_bar)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -155,6 +178,47 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             gaussians.update_alpha()
         if hasattr(gaussians, 'prepare_scaling_rot'):
             gaussians.prepare_scaling_rot()
+    if "GaussianManoModel" in str(type(gaussians)):
+        gaussians: GaussianManoModel = gaussians
+        annots = gaussians.point_cloud.mano_model.annots
+        with torch.no_grad():
+            dtype = torch.float32
+            bs = gaussians.point_cloud.mano_model.batch_size
+            bg = torch.rand((3), device="cuda") if opt.random_background else background
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+
+            samples_dir = os.path.join('samples')
+            xd = 0
+            for cam_idx in trange(len(viewpoint_stack), desc='Cameras', leave=True):
+                if xd != 0:
+                    xd -= 1
+                    continue
+                xd = 10
+                viewpoint_cam = viewpoint_stack[cam_idx]
+                render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
+                image = render_pkg["render"]
+                layers, height, width = image.shape
+
+                video = cv2.VideoWriter(os.path.join(samples_dir, f'video_{cam_idx}.mp4'), 0, 25, (width, height))
+
+                for frame, values in tqdm(annots['all_frames'].items(),desc='Frames',leave=False):
+                    # gaussians._mano_shape = torch.tensor([values['shape']],dtype=dtype, requires_grad=False).repeat(bs,1).to(gaussians._mano_shape.device)
+                    gaussians._mano_pose = torch.tensor([values['pose']],dtype=dtype, requires_grad=False).repeat(bs,1).to(gaussians._mano_pose.device)
+                    gaussians.update_alpha()
+                    gaussians.prepare_scaling_rot()
+
+                    render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
+                    image = render_pkg["render"].detach()
+                    image = torch.clip(image.detach(),0,1).permute(1,2,0).cpu().numpy()
+                    image = cv2.cvtColor(image * 255, cv2.COLOR_RGB2BGR)
+                    # a wild workaround, more so a really stupid one, it works though
+                    cv2.imwrite(os.path.join(samples_dir, f'video_test.png'),image)
+                    image = cv2.imread(os.path.join(samples_dir, f'video_test.png'))
+                    video.write(image)
+
+                cv2.destroyAllWindows()
+                video.release()
 
 
 def prepare_output_and_logger(args):
@@ -181,7 +245,7 @@ def prepare_output_and_logger(args):
 
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc,
-                    renderArgs):
+                    renderArgs,gaussian,progress_bar=None):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -212,7 +276,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                if progress_bar is None:
+                    print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                else:
+                    progress_bar.write("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -220,6 +287,21 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+
+        progress_bar.write(
+            f"Samples saved at: {os.path.join('samples',f'sample_{iteration}.jpg')}")
+        f, axarr = plt.subplots(1, 2)
+        axarr[0].imshow(torch.clip(gt_image.clone().detach(),0,1).permute(1,2,0).cpu().numpy())
+        axarr[1].imshow(torch.clip(image.clone().detach(),0,1).cpu().permute(1,2,0).numpy())
+        f.suptitle(f"GT vs generated --- {iteration}")
+        f.savefig(os.path.join('samples',f"sample_{iteration}.jpg"))
+        fig = plt.figure()
+        ax = fig.add_subplot(projection='3d')
+        plt_scatter(gaussian.get_xyz.clone().detach(),ax,'r',0.02,30000)
+        plt.savefig(os.path.join('samples',f"sample_{iteration}_xyz.jpg"))
+        plt.close(fig)
+        plt.close()
+
         torch.cuda.empty_cache()
 
 
@@ -239,6 +321,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--save_xyz", action='store_true')
+    parser.add_argument('--test-every-n', type=int, default=None)
+    parser.add_argument('--scale-loss', action='store_true', default=False)
+    torch.autograd.set_detect_anomaly(True)
 
     lp = ModelParams(parser)
     args, _ = parser.parse_known_args(sys.argv[1:])
@@ -264,7 +349,7 @@ if __name__ == "__main__":
         args.gs_type,
         lp.extract(args), op.extract(args), pp.extract(args),
         args.test_iterations, args.save_iterations, args.checkpoint_iterations,
-        args.start_checkpoint, args.debug_from, args.save_xyz
+        args.start_checkpoint, args.debug_from, args.save_xyz,args
     )
 
     # All done

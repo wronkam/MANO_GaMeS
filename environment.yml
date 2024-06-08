@@ -1,21 +1,30 @@
-name: gaussian_splatting_mesh
+name: GaMeS
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
-  - cudatoolkit=11.6
-  - plyfile=0.8.1
-  - python=3.7.13
-  - pip=22.3.1
-  - pytorch=1.12.1
-  - torchaudio=0.12.1
-  - torchvision=0.13.1
-  - trimesh==4.0.5
-  - SciPy==1.7.3
+  - pytorch=2.1.0
+  - torchvision=0.16.0
+  - torchaudio=2.1.0
+  - pytorch-cuda=12.1
+  - fvcore
+  - iopath
+  - plyfile
+  - python>=3.10,<3.11
+  - pip
+  - trimesh
+  - SciPy
   - tqdm
+  - numpy<=1.23.1
   - pip:
-    - chumpy==0.70
-    - smplx==0.1.28
+    - chumpy
+    - smplx
     - submodules/diff-gaussian-rasterization
     - submodules/simple-knn
+    - tensorboard
+    - packaging
+    - chamferdist
+    - matplotlib
+    - git+'https://github.com/otaheri/MANO'

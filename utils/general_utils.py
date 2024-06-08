@@ -211,3 +211,12 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+def plt_scatter(point, ax, c='b', alpha=0.4,sample=None):
+    with torch.no_grad():
+        if len(point.shape) == 1:
+            point = point.unsqueeze(0)
+        if sample is not None:
+            indices = torch.randperm(len(point))[:min(sample,len(point))]
+            point = point[indices]
+        point = point.clone().detach().cpu().numpy()
+        ax.scatter(point[:, 0], point[:, 1], point[:, 2], c=c, alpha=alpha)

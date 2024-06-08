@@ -15,12 +15,14 @@ from arguments import OptimizationParams
 from arguments_games import (
     OptimizationParamsMesh,
     OptimizationParamsFlame,
+    OptimizationParamsMano
 )
 
 from scene.gaussian_model import GaussianModel
 from games.mesh_splatting.scene.gaussian_mesh_model import GaussianMeshModel
 from games.multi_mesh_splatting.scene.gaussian_multi_mesh_model import GaussianMultiMeshModel
 from games.flame_splatting.scene.gaussian_flame_model import GaussianFlameModel
+from games.mano_splatting.scene.gaussian_mano_model import GaussianManoModel
 from games.flat_splatting.scene.points_gaussian_model import PointsGaussianModel
 from games.flat_splatting.scene.flat_gaussian_model import FlatGaussianModel
 
@@ -29,15 +31,18 @@ optimizationParamTypeCallbacks = {
     "gs_multi_mesh": OptimizationParamsMesh,
     "gs_flat": OptimizationParams,
     "gs_mesh": OptimizationParamsMesh,
-    "gs_flame": OptimizationParamsFlame
+    "gs_flame": OptimizationParamsFlame,
+    "gs_mano": OptimizationParamsMano,
 }
-
+# TODO: gaussian Mano model not implemented
+# base on flame, use mano https://github.com/otaheri/MANO
 gaussianModel = {
     "gs": GaussianModel,
     "gs_flat": FlatGaussianModel,
     "gs_mesh": GaussianMeshModel,
     "gs_multi_mesh": GaussianMultiMeshModel,
     "gs_flame": GaussianFlameModel,
+    "gs_mano": GaussianManoModel,
     "gs_points": PointsGaussianModel
 }
 
@@ -47,5 +52,6 @@ gaussianModelRender = {
     "gs_mesh": GaussianMeshModel,
     "gs_multi_mesh": GaussianMultiMeshModel,
     "gs_flame": GaussianFlameModel,
+    "gs_mano": GaussianManoModel,
     "gs_points": PointsGaussianModel
 }
