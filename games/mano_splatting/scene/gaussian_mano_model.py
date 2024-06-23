@@ -20,9 +20,8 @@ from arguments_games import OptimizationParamsMano
 from games.mano_splatting.utils.graphics_utils import MANOPointCloud
 from scene.gaussian_model import GaussianModel
 from utils.general_utils import inverse_sigmoid
-from games.mesh_splatting.utils.general_utils import rot_to_quat_batch
+from games.mano_splatting.utils.general_utils import rot_to_quat_batch
 from utils.sh_utils import RGB2SH
-from games.mesh_splatting.utils.graphics_utils import MeshPointCloud
 
 
 class GaussianManoModel(GaussianModel):
@@ -118,7 +117,6 @@ class GaussianManoModel(GaussianModel):
         The alphas that are taken into account are the distances
         to the vertices and the coordinates of
         the triangles forming the mesh.
-
         """
         _xyz = torch.matmul(
             self.alpha,

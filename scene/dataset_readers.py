@@ -182,9 +182,11 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
 
+    # TODO: reuse to read interhands
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
         fovx = contents["camera_angle_x"]
+        print('fovx',fovx)
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):

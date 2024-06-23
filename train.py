@@ -294,6 +294,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         axarr[0].imshow(torch.clip(gt_image.clone().detach(),0,1).permute(1,2,0).cpu().numpy())
         axarr[1].imshow(torch.clip(image.clone().detach(),0,1).cpu().permute(1,2,0).numpy())
         f.suptitle(f"GT vs generated --- {iteration}")
+        if not os.path.exists('samples'):
+            os.makedirs('samples')
         f.savefig(os.path.join('samples',f"sample_{iteration}.jpg"))
         fig = plt.figure()
         ax = fig.add_subplot(projection='3d')

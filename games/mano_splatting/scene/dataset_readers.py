@@ -10,31 +10,19 @@
 # The Gaussian-mesh-splatting is software based on Gaussian-splatting, used on research.
 # This Games software is free for non-commercial, research and evaluation use
 #
-import json
 import os
 
-import mano
 import numpy as np
-import smplx
 import torch
 from matplotlib import pyplot as plt
 from tqdm import tqdm, trange
 
-from games.mano_splatting.MANO.config import ManoConfig
 from games.mano_splatting.MANO.MANO import MANO
-from games.mano_splatting.scene.gaussian_mano_model import GaussianManoModel
-from games.mano_splatting.utils.graphics_utils import MANOPointCloud, rotate_around_mean, matrix_to_euler_angles
-from games.mesh_splatting.scene.dataset_readers import (
-    readNerfSyntheticMeshInfo
-)
-from games.multi_mesh_splatting.scene.dataset_readers import (
-    readColmapMeshSceneInfo
-)
+from games.mano_splatting.MANO.config import ManoConfig
+from games.mano_splatting.utils.graphics_utils import MANOPointCloud, matrix_to_euler_angles
 from scene.colmap_loader import read_extrinsics_binary, read_intrinsics_binary, read_extrinsics_text, \
     read_intrinsics_text, read_points3D_binary, read_points3D_text
 from scene.dataset_readers import (
-    readColmapSceneInfo,
-    readNerfSyntheticInfo,
     getNerfppNorm,
     SceneInfo,
     readColmapCameras, storePly, fetchPly,
