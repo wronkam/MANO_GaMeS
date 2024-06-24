@@ -270,7 +270,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 for idx,viewpoint in enumerate(config['cameras']):
                     if args.gs_type == 'gs_mano':
                         if args.interhands:
-                            # get frame from camera
                             viewpoint, mano_pose, time_frame = viewpoint.next()
                             scene.gaussians.reload_mano_pose(mano_pose,time_frame)
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
