@@ -12,17 +12,44 @@
 import os
 import random
 import json
+from games.mano_splatting.utils.general_utils import loadInterHandCam
 from utils.system_utils import searchForMaxIteration
 from games.scenes import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
+class CameraListWrapper:
+    def __init__(self, cameraList):
+        self.cameraList = [cam for cam in cameraList if len(cam)>0]
+        self.usage = [len(cam) for cam in self.cameraList if len(cam)>0]
+    def __len__(self):
+        return len(self.cameraList)
+    def __iter__(self):
+        return self.cameraList.__iter__()
+    def sample(self):
+        """
+        Get random camera with probability balanced by remaining usages
+        Returns:
+        """
+        # TODO: weighted sample, prefix table + bin_search
+        sample = random.randint(0, len(self) - 1)
+        return self[sample]
+    def __getitem__(self, idx):
+        item = self.cameraList[idx]
+        self.usage[idx] -= 1
+        if self.usage[idx] <=0:
+            del self.cameraList[idx]
+            del self.usage[idx]
+        return item
+
 class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None,
+                 shuffle=False, # no point shuffling, there is random used when picking cameras up
+                 resolution_scales=[1.0]):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -39,7 +66,7 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
-
+        self.mano_config = None
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             if args.gs_type == "gs_multi_mesh":
                 scene_info = sceneLoadTypeCallbacks["Colmap_Mesh"](
@@ -47,31 +74,18 @@ class Scene:
                 )
             elif args.gs_type == "gs_mano":
                 scene_info = sceneLoadTypeCallbacks["Colmap_MANO"](args.source_path, args.images, args.eval)
+                self.mano_config = scene_info.mano_config
             else:
                 scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
-            if args.gs_type == "gs_mesh":
-                print("Found transforms_train.json file, assuming Blender_Mesh data set!")
-                scene_info = sceneLoadTypeCallbacks["Blender_Mesh"](
-                    args.source_path, args.white_background, args.eval, args.num_splats[0]
-                )
-            elif args.gs_type == "gs_flame":
-                print("Found transforms_train.json file, assuming Blender data set!")
-                scene_info = sceneLoadTypeCallbacks["Blender_FLAME"](args.source_path, args.white_background, args.eval)
-            else:
                 print("Found transforms_train.json file, assuming Blender data set!")
                 scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
-            if args.gs_type == "gs_multi_mesh":
-                for i, ply_path in enumerate(scene_info.ply_path):
-                    with open(ply_path, 'rb') as src_file, open(os.path.join(self.model_path, f"input_{i}.ply") , 'wb') as dest_file:
-                        dest_file.write(src_file.read())
-            else:
-                with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                    dest_file.write(src_file.read())
+            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+                dest_file.write(src_file.read())
             json_cams = []
             camlist = []
             if scene_info.test_cameras:
@@ -90,10 +104,17 @@ class Scene:
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
         for resolution_scale in resolution_scales:
-            print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
-            print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+            if args.interhands:
+                cam_loader = lambda a,b,c,d: loadInterHandCam(a,b,c,d,self.mano_config)
+                print("Loading InterHands Training Cameras")
+                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale,args,loader=cam_loader)
+                print("Loading InterHands Test Cameras")
+                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale,args,loader=cam_loader)
+            else:
+                print("Loading Training Cameras")
+                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+                print("Loading Test Cameras")
+                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
@@ -101,8 +122,6 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
             self.gaussians.point_cloud = scene_info.point_cloud
-            if args.gs_type == "gs_mesh":
-                self.gaussians.triangles = scene_info.point_cloud.triangles
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
@@ -111,7 +130,7 @@ class Scene:
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
     def getTrainCameras(self, scale=1.0):
-        return self.train_cameras[scale]
+        return CameraListWrapper(self.train_cameras[scale])
 
     def getTestCameras(self, scale=1.0):
-        return self.test_cameras[scale]
+        return CameraListWrapper(self.test_cameras[scale])

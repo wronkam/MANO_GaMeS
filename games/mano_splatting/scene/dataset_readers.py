@@ -19,6 +19,7 @@ from tqdm import tqdm, trange
 
 from games.mano_splatting.MANO.MANO import MANO
 from games.mano_splatting.MANO.config import ManoConfig
+from games.mano_splatting.utils.general_utils import InterHandsSceneInfo
 from games.mano_splatting.utils.graphics_utils import MANOPointCloud, matrix_to_euler_angles
 from scene.colmap_loader import read_extrinsics_binary, read_intrinsics_binary, read_extrinsics_text, \
     read_intrinsics_text, read_points3D_binary, read_points3D_text
@@ -204,13 +205,6 @@ def readColmapManoInfo(path, images, eval, llffhold=8):
         pcd = fetchPly(ply_path)
     except:
         pcd = None
-    # TODO: here you need to make and initialize MANOPointCloud to pass as pcd (but move it to mano reader)
-    # scene_info = SceneInfo(point_cloud=pcd,
-    #                      train_cameras=train_cam_infos,
-    #                      test_cameras=test_cam_infos,
-    #                      nerf_normalization=nerf_normalization,
-    #                      ply_path=ply_path)
-    # return scene_info
 
     # print("Reading MANO object")
     mano_config = ManoConfig()
@@ -295,11 +289,12 @@ def readColmapManoInfo(path, images, eval, llffhold=8):
             vertices_enlargement_init=mano_config.vertices_enlargement
         )
 
-    scene_info = SceneInfo(point_cloud=pcd,
+    scene_info = InterHandsSceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
-                           ply_path=ply_path)
+                           ply_path=ply_path,
+                           mano_config=mano_config)
     return scene_info
 
 

@@ -70,7 +70,7 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
                             + testing_iterations)))
     print("testing at:",testing_iterations)
 
-    viewpoint_stack = None
+    viewpoint_stack = scene.getTrainCameras()
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress",initial=first_iter)
     first_iter += 1
@@ -103,16 +103,21 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+        if len(viewpoint_stack) == 0:
+            # works like next epoch
+            viewpoint_stack = scene.getTrainCameras()
+        viewpoint_cam = viewpoint_stack.sample()
+        if args.gs_type == 'gs_mano':
+            if args.interhands:
+                # get frame from camera
+                viewpoint_cam, mano_pose, time_frame = viewpoint_cam.next()
+                gaussians.reload_mano_pose(mano_pose,time_frame)
 
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
-
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], \
         render_pkg["visibility_filter"], render_pkg["radii"]
@@ -185,17 +190,16 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             dtype = torch.float32
             bs = gaussians.point_cloud.mano_model.batch_size
             bg = torch.rand((3), device="cuda") if opt.random_background else background
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
+            sample_viewpoint_stack = scene.getTrainCameras()
 
             samples_dir = os.path.join('samples')
             xd = 0
-            for cam_idx in trange(len(viewpoint_stack), desc='Cameras', leave=True):
+            for cam_idx in trange(len(sample_viewpoint_stack), desc='Cameras', leave=True):
                 if xd != 0:
                     xd -= 1
                     continue
                 xd = 10
-                viewpoint_cam = viewpoint_stack[cam_idx]
+                viewpoint_cam = sample_viewpoint_stack[cam_idx]
                 render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
                 image = render_pkg["render"]
                 layers, height, width = image.shape
@@ -263,9 +267,18 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
+                for idx,viewpoint in enumerate(config['cameras']):
+                    if args.gs_type == 'gs_mano':
+                        if args.interhands:
+                            # get frame from camera
+                            viewpoint, mano_pose, time_frame = viewpoint.next()
+                            scene.gaussians.reload_mano_pose(mano_pose,time_frame)
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    if not os.path.exists(os.path.join('samples',f"sample_{iteration}")):
+                        os.makedirs(os.path.join('samples',f"sample_{iteration}"),exist_ok=True)
+                    torchvision.utils.save_image(gt_image,os.path.join('samples',f"sample_{iteration}",f"{viewpoint.image_name}_gt.jpg"))
+                    torchvision.utils.save_image(image,os.path.join('samples',f"sample_{iteration}",f"{viewpoint.image_name}_img.jpg"))
                     if tb_writer and (idx < 5):
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name),
                                              image[None], global_step=iteration)
@@ -325,6 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_xyz", action='store_true')
     parser.add_argument('--test-every-n', type=int, default=None)
     parser.add_argument('--scale-loss', action='store_true', default=False)
+    parser.add_argument('--interhands', action='store_true', default=False)
     torch.autograd.set_detect_anomaly(True)
 
     lp = ModelParams(parser)
@@ -332,6 +346,7 @@ if __name__ == "__main__":
     lp.num_splats = args.num_splats
     lp.meshes = args.meshes
     lp.gs_type = args.gs_type
+    lp.interhands = args.interhands
 
     op = optimizationParamTypeCallbacks[args.gs_type](parser)
     pp = PipelineParams(parser)

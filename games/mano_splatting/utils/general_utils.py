@@ -10,9 +10,18 @@
 # The Gaussian-mesh-splatting is software based on Gaussian-splatting, used on research.
 # This Games software is free for non-commercial, research and evaluation use
 #
+import json
+import os, re
+import random
+from typing import NamedTuple, Tuple
 
 import torch
 import torch.nn.functional as F
+from PIL import Image
+from scene.cameras import Camera
+from utils.general_utils import PILtoTorch
+from scene.dataset_readers import CameraInfo
+from games.mano_splatting.MANO import ManoConfig
 
 
 def write_mesh_obj(
@@ -153,3 +162,122 @@ def quaternion_rotation_matrix(Q):
                                [r20, r21, r22]])
 
     return rot_matrix
+
+class InterHandsSceneInfo(NamedTuple):  # (SceneInfo):
+    # TODO: fix inheritance
+    mano_config: ManoConfig
+    point_cloud: NamedTuple
+    train_cameras: list
+    test_cameras: list
+    nerf_normalization: dict
+    ply_path: str
+
+def loadInterHandCam(args, id, cam_info, resolution_scale,mano_config):
+    orig_w, orig_h = cam_info.image.size
+
+    if args.resolution in [1, 2, 4, 8]:
+        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    else:  # should be a type that converts to float
+        if args.resolution == -1:
+            if orig_w > 1600:
+                global WARNED
+                if not WARNED:
+                    print("[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
+                          "If this is not desired, please explicitly specify '--resolution/-r' as 1")
+                    WARNED = True
+                global_down = orig_w / 1600
+            else:
+                global_down = 1
+        else:
+            global_down = orig_w / args.resolution
+
+        scale = float(global_down) * float(resolution_scale)
+        resolution = (int(orig_w / scale), int(orig_h / scale))
+
+    return InterHandCamera(cam_info=cam_info, mano_config=mano_config,
+                           resolution=resolution, uid=id, data_device=args.data_device)
+
+    """
+    if resized_image_rgb.shape[1] == 4:
+        loaded_mask = resized_image_rgb[3:4, ...]
+
+    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,
+                  image=gt_image, gt_alpha_mask=loaded_mask,
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+    """
+
+
+def extract_number(string):
+    return re.sub('[^0-9]', '', string)
+
+
+class InterHandCamera:
+    def __init__(self, cam_info: CameraInfo,mano_config:ManoConfig, resolution: Tuple[int, int], uid, data_device):
+        self.mano_config = mano_config
+        self.resolution = resolution
+        #  resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+        self.uid = uid
+        self.cam_info = cam_info
+        self.data_device = data_device
+
+        self.annotation = os.path.join(mano_config.InterHands_annots_path)
+        self.capture = extract_number(self.mano_config.InterHands_keys[1]) # captureX with X in [0..7]
+
+        camera_name = cam_info.image_name
+        self.camera_name= camera_name
+        self.mask_path = os.path.join(*([self.mano_config.InterHands_masks_path]+mano_config.InterHands_keys+[f'cam{camera_name}']))
+        self.masks = [f for f in os.listdir(self.mask_path) if os.path.isfile(os.path.join(self.mask_path, f))]
+
+        self.image_path = os.path.join(*([self.mano_config.InterHands_images_path]+mano_config.InterHands_keys+[f'cam{camera_name}']))
+        self.images = [f for f in os.listdir(self.image_path) if os.path.isfile(os.path.join(self.image_path, f))
+                       and (extract_number(f) in [extract_number(v) for v in  self.masks])]  # images are jpg and masks are png
+
+        self.frames = sorted([extract_number(f) for f in os.listdir(self.image_path) if os.path.isfile(os.path.join(self.image_path, f))])
+
+        if mano_config.limit_frames is not None:
+            self.frames = self.frames[mano_config.limit_frames_center-mano_config.limit_frames:
+                                      mano_config.limit_frames_center+mano_config.limit_frames]
+            self.images = [f for f in self.images if extract_number(f) in self.frames]
+            self.masks = [f for f in self.masks if extract_number(f) in self.frames]
+
+        self.frames = {name:t for t,name in enumerate(self.frames)}
+
+        self.shuffle()
+
+    def __len__(self):
+        return len(self.images)
+    def next(self):
+        if self.iterator == len(self):
+            self.shuffle()
+            self.iterator = 0
+        idx = self.iterator
+        self.iterator +=1
+        name = extract_number(self.images[idx])
+        mano_pose = self._get_mano(name)
+        return self._get_cam(idx), mano_pose, self.frames[name]
+    def _get_cam(self,idx):
+        gt_image = Image.open(os.path.join(self.image_path, self.images[idx]))
+        loaded_mask = Image.open(os.path.join(self.mask_path, self.masks[idx]))
+
+        gt_image = PILtoTorch(gt_image, self.resolution)
+        loaded_mask = PILtoTorch(loaded_mask, self.resolution)
+        if loaded_mask.shape[0] > 1: # probably 3 x H x W
+            loaded_mask = loaded_mask.mean(0).unsqueeze(0)
+        return Camera(colmap_id=self.uid, R=self.cam_info.R, T=self.cam_info.T,
+                      FoVx=self.cam_info.FovX, FoVy=self.cam_info.FovY,
+                      image=gt_image, gt_alpha_mask=loaded_mask,
+                      image_name=self.cam_info.image_name, uid=id, data_device=self.data_device)
+
+
+    def shuffle(self):
+        order = list(range(len(self.images)))
+        random.shuffle(order)
+        self.iterator = 0
+        self.order = order
+
+    def _get_mano(self,name):
+        hand = 'right' if self.mano_config.mano_is_rhand else 'left'
+        with open(self.annotation,'r') as f:
+            annots = json.load(f)
+        return annots[self.capture][name][hand]['pose']

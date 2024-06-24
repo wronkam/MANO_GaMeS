@@ -55,10 +55,20 @@ class GaussianManoModel(GaussianModel):
         self._scales = torch.empty(0)
         self.faces = torch.empty(0)
         self._vertices_enlargement = torch.empty(0)
+        self.time_frame = -1
 
     @property
     def get_xyz(self):
         return self._xyz
+
+    def reload_mano_pose(self,pose,time_frame=-1):
+        if time_frame == self.time_frame:
+            return
+        self._mano_pose = torch.tensor(pose, dtype=self._mano_pose.dtype, requires_grad=False
+                                       ).repeat(self._mano_pose.shape[0], 1).to(self._mano_pose.device)
+        self.update_alpha()
+        self.prepare_scaling_rot()
+        self.time_frame = time_frame
 
     def create_from_pcd(self, pcd: MANOPointCloud, spatial_lr_scale: float):
         self.point_cloud = pcd
