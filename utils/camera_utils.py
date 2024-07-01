@@ -8,6 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+from tqdm import tqdm
 
 from scene.cameras import Camera
 import numpy as np
@@ -54,7 +55,7 @@ def loadCam(args, id, cam_info, resolution_scale):
 def cameraList_from_camInfos(cam_infos, resolution_scale, args,loader=loadCam):
     camera_list = []
 
-    for id, c in enumerate(cam_infos):
+    for id, c in enumerate(tqdm(cam_infos, desc="Loading cameras")):
         camera_list.append(loader(args, id, c, resolution_scale))
 
     return camera_list

@@ -8,10 +8,13 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-
+import concurrent.futures
 import os
 import random
 import json
+from functools import reduce
+from typing import List
+
 from games.mano_splatting.utils.general_utils import loadInterHandCam
 from utils.system_utils import searchForMaxIteration
 from games.scenes import sceneLoadTypeCallbacks
@@ -22,7 +25,8 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 class CameraListWrapper:
     def __init__(self, cameraList):
         self.cameraList = [cam for cam in cameraList if len(cam)>0]
-        self.usage = [len(cam) for cam in self.cameraList if len(cam)>0]
+        self.order: List[int] = reduce(lambda a, b: a + b,  # flatten
+                                       [[idx for _ in range(len(cam))] for idx, cam in enumerate(self.cameraList)])
     def __len__(self):
         return len(self.cameraList)
     def __iter__(self):
@@ -32,15 +36,14 @@ class CameraListWrapper:
         Get random camera with probability balanced by remaining usages
         Returns:
         """
-        # TODO: weighted sample, prefix table + bin_search
-        sample = random.randint(0, len(self) - 1)
-        return self[sample]
+        if len(self.order) == 0:
+            self.order: List[int] = reduce(lambda a, b: a + b,  # flatten
+                                           [[idx for _ in range(len(cam))] for idx, cam in enumerate(self.cameraList)])
+        sample = random.randint(0, len(self.order) - 1)
+        sample = self.order.pop(sample)
+        return self.cameraList[sample]
     def __getitem__(self, idx):
         item = self.cameraList[idx]
-        self.usage[idx] -= 1
-        if self.usage[idx] <=0:
-            del self.cameraList[idx]
-            del self.usage[idx]
         return item
 
 class Scene:
@@ -105,7 +108,11 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             if args.interhands:
-                cam_loader = lambda a,b,c,d: loadInterHandCam(a,b,c,d,self.mano_config)
+                if self.mano_config.num_workers >= 1:
+                    self.threads = concurrent.futures.ThreadPoolExecutor(max_workers=self.mano_config.num_workers)
+                else:
+                    self.threads = None
+                cam_loader = lambda a,b,c,d: loadInterHandCam(a,b,c,d,self.mano_config,self.threads)
                 print("Loading InterHands Training Cameras")
                 self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale,args,loader=cam_loader)
                 print("Loading InterHands Test Cameras")
@@ -125,12 +132,21 @@ class Scene:
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
+        self.scaled_train_cameras = {}
+        self.scaled_test_cameras = {}
+
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
     def getTrainCameras(self, scale=1.0):
-        return CameraListWrapper(self.train_cameras[scale])
+        if scale not in self.scaled_train_cameras.keys():
+            print("Loading Training Cameras")
+            self.scaled_train_cameras[scale] = CameraListWrapper(self.train_cameras[scale])
+        return self.scaled_train_cameras[scale]
 
     def getTestCameras(self, scale=1.0):
-        return CameraListWrapper(self.test_cameras[scale])
+        if scale not in self.scaled_test_cameras.keys():
+            print("Loading Test Cameras")
+            self.scaled_test_cameras[scale] = CameraListWrapper(self.test_cameras[scale])
+        return self.scaled_test_cameras[scale]

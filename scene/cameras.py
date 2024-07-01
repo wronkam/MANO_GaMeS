@@ -36,7 +36,9 @@ class Camera(nn.Module):
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
 
-        self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
+        original_image = image.clamp(0.0, 1.0).to(self.data_device)
+        # so it is moved with .to(device)
+        self.register_parameter('original_image',nn.Parameter(original_image, requires_grad=False))
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
 
@@ -51,12 +53,22 @@ class Camera(nn.Module):
         self.trans = trans
         self.scale = scale
 
-        self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
-        self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
-        self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
-        self.camera_center = self.world_view_transform.inverse()[3, :3]
+        self.register_parameter('world_view_transform',
+                                nn.Parameter(torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).to(self.data_device),
+                                             requires_grad=False))
+        self.register_parameter('projection_matrix',
+                                nn.Parameter(getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).to(self.data_device),
+                                             requires_grad=False))
+        self.register_parameter('full_proj_transform',
+                                nn.Parameter((self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0),
+                                             requires_grad=False))
+        self.register_parameter('camera_center',
+                                nn.Parameter(self.world_view_transform.inverse()[3, :3],
+                                             requires_grad=False))
+
     def __len__(self):
         return 1
+
 
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
