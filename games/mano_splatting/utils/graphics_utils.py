@@ -66,12 +66,16 @@ def get_vertices(mano_layer, m_hand_pose, m_root_pose, m_rotation, m_scale, m_sh
     mano_output = mano_layer(global_orient=m_root_pose, hand_pose=m_hand_pose, betas=m_shape,
                              transl=torch.zeros_like(m_trans))
     vertices = mano_output.vertices
+    # TODO: add more vertices from 4D alpha, 3 used as in mano_gs, 4th for elevation scaling with sqrt(of face area)
     return transform_vertices(vertices, m_rotation, m_scale,m_trans,mean)
+
+
 """
 Following come from pytorch3d code: 
 https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/transforms/rotation_conversions.html#axis_angle_to_matrix
 and are copied here due to complicated pytorch3d instalation and general lack of need for the rest of the library
 """
+
 def matrix_to_euler_angles(matrix: torch.Tensor, convention: str='XYZ') -> torch.Tensor:
     """
     Convert rotations given as rotation matrices to Euler angles in radians.

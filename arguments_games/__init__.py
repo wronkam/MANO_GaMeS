@@ -31,7 +31,7 @@ class OptimizationParamsMesh(ParamGroup):
 
 class OptimizationParamsMano(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 60_000
+        self.iterations = 75_000
         self.alpha_lr = 0.001
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05

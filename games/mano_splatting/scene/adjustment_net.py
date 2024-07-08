@@ -85,20 +85,16 @@ class AdjustmentNet(nn.Module):
         return {'scale': scale_d, 'rotation': rotation_d, 'transl': transl_d,
                 'mano_shape': shape_d, 'mano_pose': pose_d}
 
-    def forward(self, face_id, alpha, scale, xyz, time_embedding):
-        #face_embedding = self.nets['face_embedding'](face_id)
+    def forward(self, alpha, scale, time_embedding):
 
         alpha = torch.flatten(alpha,0,1) # has size face x id x 3 not [face x id ] x 3
-        joint_input = torch.cat([alpha, scale, xyz], dim=-1)
+        joint_input = torch.cat([alpha, scale], dim=-1)
         joint_embedding = self.nets['joint_embedding'](joint_input)
-        # does this repeat align, with witch gs is in which face?
-        # face_embedding = face_embedding.repeat(joint_embedding.shape[0]//face_embedding.shape[0],1)
         time_embedding = time_embedding.repeat(joint_embedding.shape[0],1)
         main_input = torch.cat([joint_embedding, time_embedding], dim=-1)
         out = self.nets['main'](main_input)
 
-        alpha_d, scale_d, xyz_d = out[..., :3], out[..., 3:4], out[..., 4:]
-        xyz_d = self.nets['xyz_net'](xyz_d)
+        alpha_d, scale_d = out[..., :3], out[..., 3:]
         alpha_d = self.nets['alpha_net'](alpha_d)
         scale_d = self.nets['scale_net'](scale_d)
-        return {'alpha': alpha_d, 'scale': scale_d, 'xyz': xyz_d}
+        return {'alpha': alpha_d, 'scale': scale_d}

@@ -52,7 +52,8 @@ class ManoConfig:
 
         self.scale_loss: int = 0  # 20
 
-        self.adjustment_warmup = 55000
+        self.use_adjustment_net: bool = True
+        self.adjustment_warmup = 60000
         self.adjustment_net = {
             'frame_embedding': {
                 'in': 1, 'out': 8,
@@ -88,15 +89,12 @@ class ManoConfig:
                 'in': 64, 'out': 1+3+3+48+10,  # out: scale, rotation, transl, pose, shape
                 'width': 64, 'depth': 2, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             # ---------------------------------------------------------------------------------------------------------
-            'joint_embedding': {  # alpha, scale, xyz
-                'in': 3+1+3, 'out': 32*3,
+            'joint_embedding': {  # alpha, scale
+                'in': 3+1, 'out': 32*2,
                 'width': 128, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', 16), 'bn': True, 'dropout': 0.3},
             'main': {  # input: time_embedding, joint_embedding, face_embedding
-                'in': 64+32*3, 'out': 3+1+3,  # 320->7
+                'in': 64+32*2, 'out': 3+1,  # 320->7
                 'width': 128, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
-            'xyz_net': {
-               'in': 3, 'out': 3,
-               'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'alpha_net': {
                 'in': 3, 'out': 3,
                 'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
