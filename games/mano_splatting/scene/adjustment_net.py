@@ -50,6 +50,7 @@ class AdjustmentNet(nn.Module):
     def __init__(self, config: ManoConfig):
         super().__init__()
         nets = {}
+        self.sizes = config.embed_size
         for name, net_config in config.adjustment_net.items():
             nets[name] = get_net(net_config)
         self.nets = nn.ModuleDict(nets)
@@ -74,14 +75,25 @@ class AdjustmentNet(nn.Module):
 
     def get_mano_adjustments(self, time_embedding):
         mano_adjustment = self.nets['mano_adjustment'](time_embedding)
+
+        scale_idx = self.sizes['m_scale']
+        rotation_idx = scale_idx+self.sizes['m_rotation']
+        translation_idx = rotation_idx+self.sizes['m_transl']
+        shape_idx = translation_idx+self.sizes['m_shape']
+
         (scale_d, rotation_d, transl_d, shape_d, pose_d) = (
-            mano_adjustment[..., 0], mano_adjustment[..., 1:4], mano_adjustment[..., 4:7],
-            mano_adjustment[..., 7:17], mano_adjustment[..., 17:])
+            mano_adjustment[..., :scale_idx],
+            mano_adjustment[..., scale_idx:rotation_idx],
+            mano_adjustment[..., rotation_idx:translation_idx],
+            mano_adjustment[..., translation_idx:shape_idx],
+            mano_adjustment[..., shape_idx:])
+
         scale_d = self.nets['mano_scale_net'](scale_d)
         rotation_d = self.nets['mano_rotation_net'](rotation_d)
         transl_d = self.nets['mano_transl_net'](transl_d)
         shape_d = self.nets['mano_shape_net'](shape_d)
         pose_d = self.nets['mano_pose_net'](pose_d)
+
         return {'scale': scale_d, 'rotation': rotation_d, 'transl': transl_d,
                 'mano_shape': shape_d, 'mano_pose': pose_d}
 
@@ -90,11 +102,14 @@ class AdjustmentNet(nn.Module):
         alpha = torch.flatten(alpha,0,1) # has size face x id x 3 not [face x id ] x 3
         joint_input = torch.cat([alpha, scale], dim=-1)
         joint_embedding = self.nets['joint_embedding'](joint_input)
+
         time_embedding = time_embedding.repeat(joint_embedding.shape[0],1)
         main_input = torch.cat([joint_embedding, time_embedding], dim=-1)
         out = self.nets['main'](main_input)
 
-        alpha_d, scale_d = out[..., :3], out[..., 3:]
+        alpha_d, scale_d = out[..., :self.sizes['alpha']], out[..., self.sizes['alpha']:]
+
         alpha_d = self.nets['alpha_net'](alpha_d)
         scale_d = self.nets['scale_net'](scale_d)
+
         return {'alpha': alpha_d, 'scale': scale_d}

@@ -1,5 +1,6 @@
 import os
-from typing import List
+import warnings
+from typing import List, Dict
 
 import torch
 
@@ -54,51 +55,80 @@ class ManoConfig:
 
         self.use_adjustment_net: bool = True
         self.adjustment_warmup = 60000
+        embed_size: Dict[str, int] = {
+            'pose_shape': 84,
+            'geo': 16,
+            'mano': 128,
+            'frame': 16,
+            'm_transl': 16,
+            'm_rotation': 16,
+            'm_scale': 16,
+            'm_shape': 16,
+            'm_pose': 64,
+            'time': 64,
+            'joint': 2 * 32,
+            'alpha': 16,
+            'scale': 16,
+        }
+        self.embed_size = embed_size
         self.adjustment_net = {
             'frame_embedding': {
-                'in': 1, 'out': 8,
-                'width': 16, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', 16), 'bn': False, 'dropout': 0.3},
+                'in': 1, 'out': embed_size['frame'],
+                'width': 32, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', 32), 'bn': False, 'dropout': 0.3},
             'mano_pose_shape_embedding': {
-                'in': 48+10, 'out': 84,  # pose (always loaded), shape (learnable)
+                'in': 48 + 10, 'out': embed_size['pose_shape'],  # pose (always loaded), shape (learnable)
                 'width': 96, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_geometric_embedding': {
-                'in': 1+3+3, 'out': 7*16,  # scale, rotation, transl, 7*16=112
-                'width': 64, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', 16), 'bn': False, 'dropout': 0.3},
+                'in': 1 + 3 + 3, 'out': 7 * embed_size['geo'],  # scale 1, rotation 3, transl 3
+                'width': 128, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', 16), 'bn': False, 'dropout': 0.3},
             'mano_embedding': {
-                'in': 84+112, 'out': 128,  # mano_geometric_embedding, mano_geometric_embedding
+                'in': embed_size['pose_shape'] + 7 * embed_size['geo'],
+                'out': embed_size['mano'],  # mano_geometric_embedding, mano_geometric_embedding
                 'width': 256, 'depth': 2, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_transl_net': {
-               'in': 3, 'out': 3,
-               'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
+                'in': embed_size['m_transl'], 'out': 3,
+                'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_rotation_net': {
-               'in': 3, 'out': 3,
-               'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
+                'in': embed_size['m_rotation'], 'out': 3,
+                'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_scale_net': {
-                'in': 1, 'out': 1,
-                'width': 8, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
+                'in': embed_size['m_scale'], 'out': 1,
+                'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_shape_net': {
-                'in': 10, 'out': 10,
+                'in': embed_size['m_shape'], 'out': 10,
                 'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_pose_net': {
-                'in': 48, 'out': 48,
-                'width': 48, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
+                'in': embed_size['m_pose'], 'out': 48,
+                'width': 64, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'time_embedding': {
-                'in': 128+8, 'out': 64,  # frame-embedding + mano_embedding
-                'width': 128, 'depth': 2, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
+                'in': embed_size['mano'] + embed_size['frame'],
+                'out': embed_size['time'],  # frame-embedding + mano_embedding
+                'width': 196, 'depth': 2, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             'mano_adjustment': {  # input: time_embedding
-                'in': 64, 'out': 1+3+3+48+10,  # out: scale, rotation, transl, pose, shape
-                'width': 64, 'depth': 2, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
+                'in': 64,  # out: scale, rotation, transl, pose, shape
+                'out': embed_size['m_scale'] + embed_size['m_rotation']
+                       + embed_size['m_transl'] + embed_size['m_pose'] + embed_size['m_shape'],
+                'width': 256, 'depth': 2, 'activation': 'relu', 'embed': ('None', None), 'bn': False, 'dropout': 0.3},
             # ---------------------------------------------------------------------------------------------------------
             'joint_embedding': {  # alpha, scale
-                'in': 3+1, 'out': 32*2,
-                'width': 128, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', 16), 'bn': True, 'dropout': 0.3},
-            'main': {  # input: time_embedding, joint_embedding, face_embedding
-                'in': 64+32*2, 'out': 3+1,  # 320->7
+                'in': 3 + 1, 'out': embed_size['joint'],
+                'width': 128, 'depth': 2, 'activation': 'relu', 'embed': ('GFF+', embed_size['joint'] // 2),
+                'bn': True, 'dropout': 0.3},
+            'main': {  # input: time_embedding, joint_embedding
+                'in': embed_size['time'] + embed_size['joint'],
+                'out': embed_size['alpha'] + embed_size['scale'],
                 'width': 128, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
             'alpha_net': {
-                'in': 3, 'out': 3,
-                'width': 16, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
+                'in': embed_size['alpha'], 'out': 3,
+                'width': 32, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
             'scale_net': {
-                'in': 1, 'out': 1,
-                'width': 8, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
+                'in': embed_size['scale'], 'out': 1,
+                'width': 32, 'depth': 4, 'activation': 'relu', 'embed': ('None', None), 'bn': True, 'dropout': 0.3},
         }
+        for name, net in self.adjustment_net.items():
+            for key in ['in', 'out', 'width', 'depth', 'activation', 'embed', 'bn', 'dropout']:
+                if key not in net.keys():
+                    raise ValueError(f'Adjustment net {name} subnet does not have {key} defined')
+            if net['in'] > net['width'] or net['out'] > net['width']:
+                warnings.warn(f"Adjustment net {name}'s input or output is wider than the network.\n "
+                              f"In:{net['in']}, Out:{net['out']}, Width:{net['width']}:")
