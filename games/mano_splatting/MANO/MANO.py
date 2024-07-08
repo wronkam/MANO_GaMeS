@@ -47,16 +47,13 @@ class MANO(nn.Module):
     def __init__(self, config:ManoConfig):
         super(MANO, self).__init__()
         print("creating the MANO Decoder")
+        self.config = config
         if config.annot_path is not None:
             with open(config.annot_path,'r') as f_annot:
                 annots = json.load(f_annot)
         else:
             annots = {'is_rhand':config.mano_is_rhand}
         mano_model_path = config.mano_rhand_path if annots['is_rhand'] else config.mano_lhand_path
-        # TODO: make ManoModel, use pcd for transl and scale
-        #  and compute PCA to get rotation (if no annots)
-        #  or load some optional config file (done in annots)
-        #  remember to checkpoint mano params separately
         self.mean_xyz = None
         self.mano_model = smplx.create(mano_model_path,
                                   model_type='mano',
@@ -128,7 +125,6 @@ class MANO(nn.Module):
 
 
     def forward(self, shape=None, pose=None, transl=None, scale = None, rotation = None):
-        # TODO
         """
             Input:
                 shape_params: N X number of shape parameters

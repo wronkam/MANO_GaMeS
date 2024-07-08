@@ -31,7 +31,7 @@ class OptimizationParamsMesh(ParamGroup):
 
 class OptimizationParamsMano(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 30_000
+        self.iterations = 60_000
         self.alpha_lr = 0.001
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
@@ -42,7 +42,8 @@ class OptimizationParamsMano(ParamGroup):
         self.mano_pose_lr = 0.001
         self.mano_rot_lr = 0.001
         self.mano_transl_lr = 0.001
-        self.vertices_enlargement_lr = 0.00002
+        self.adjustment_net_lr = 0.0001
+        self.vertices_enlargement_lr = 0.0002
         self.random_background = False
         self.use_mesh = True
         self.lambda_dssim = 0.2

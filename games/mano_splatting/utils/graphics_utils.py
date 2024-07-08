@@ -15,6 +15,8 @@ import numpy as np
 import torch
 from typing import NamedTuple
 
+from torch import nn
+
 
 # TODO: MANOPointCloud
 class MANOPointCloud(NamedTuple):
@@ -24,7 +26,7 @@ class MANOPointCloud(NamedTuple):
     normals: np.array
     faces: torch.Tensor
     vertices_init: torch.Tensor
-    mano_model: object
+    mano_model: nn.Module
     transform_vertices_function: object
 
     mano_model_shape_init: torch.Tensor

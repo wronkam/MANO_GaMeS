@@ -262,7 +262,7 @@ class QueueStorage(Storage):
         return data, True
 
     def store(self, data):
-        self.storage.put_nowait(data)
+        self.storage.put(data)
 
 
 # noinspection SpellCheckingInspection

@@ -10,13 +10,16 @@
 # The Gaussian-mesh-splatting is software based on Gaussian-splatting, used on research.
 # This Games software is free for non-commercial, research and evaluation use
 #
+from typing import Dict
 
 import torch
 import numpy as np
+from games.mano_splatting.MANO import ManoConfig
 
 from torch import nn
 
 from arguments_games import OptimizationParamsMano
+from games.mano_splatting.scene.adjustment_net import AdjustmentNet
 from games.mano_splatting.utils.graphics_utils import MANOPointCloud
 from scene.gaussian_model import GaussianModel
 from utils.general_utils import inverse_sigmoid
@@ -25,17 +28,18 @@ from utils.sh_utils import RGB2SH
 
 
 class GaussianManoModel(GaussianModel):
-    # TODO: move only pose not shape on render, try smaller gauss, find magic param, maybe, split faces into smaller ones (somehow, one alpha-like param per face that splits triangle into 3)
     def __init__(self, sh_degree: int):
 
         super().__init__(sh_degree)
-        self.point_cloud = None
+        self.point_cloud:MANOPointCloud = None
         self._alpha = torch.empty(0)
         self.alpha = torch.empty(0)
         self.softmax = torch.nn.Softmax(dim=2)
 
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
+        self.warm_up_steps = 15000
+        self.warm_up = 0
         def taylor_softmax(x: torch.Tensor,eps:float=1e-9) -> torch.Tensor:
             x = 1 + x + 0.5 * x ** 2 + eps/x.shape[-1]
             return x / x.sum(-1,keep_dim=True)
@@ -55,25 +59,78 @@ class GaussianManoModel(GaussianModel):
         self._scales = torch.empty(0)
         self.faces = torch.empty(0)
         self._vertices_enlargement = torch.empty(0)
-        self.time_frame = -1
+        self.time_frame = torch.tensor([-1], dtype=torch.int)
+
+        self.mano_config: ManoConfig = None
+        self.adjustment_net: AdjustmentNet = None
+        self.adjustments: Dict[str,torch.Tensor] = {}
+        self.mano_adjustments: Dict[str,torch.Tensor] = {}
+        self.time_embedding = torch.empty(0)
+
+        self._mano_shape = torch.empty(0)
+        self._mano_pose = torch.empty(0)
+        self._mano_transl = torch.empty(0)
+        self._mano_rotation = torch.empty(0)
+        self._mano_scale = torch.empty(0)
 
     @property
     def get_xyz(self):
-        return self._xyz
+        if 'xyz' not in self.adjustments:
+            return  self._xyz
+        return self._xyz + self.adjustments['xyz'] * (self.warm_up/self.warm_up_steps)
 
     def reload_mano_pose(self,pose,time_frame=-1):
-        if time_frame == self.time_frame:
-            return
         self._mano_pose = torch.tensor(pose, dtype=self._mano_pose.dtype, requires_grad=False
                                        ).repeat(self._mano_pose.shape[0], 1).to(self._mano_pose.device)
+        self._generate_adjustments(time_frame)
         self.update_alpha()
         self.prepare_scaling_rot()
         self.time_frame = time_frame
 
+    def _generate_adjustments(self,time=None):
+        self._generate_mano_adjustments(time)
+        self._generate_gauss_adjustments()
+        self.warm_up = min(self.warm_up + 1,self.warm_up_steps)
+    def _generate_gauss_adjustments(self):
+        assert self.time_embedding is not None
+        self.adjustments = self.adjustment_net(
+            # face_id, alpha, scale, xyz, time_embedding
+            face_id = self.faces.detach(),
+            alpha = self._alpha.detach(),
+            scale = self._scales.detach(),
+            xyz = self._xyz.detach(),
+            time_embedding = self.time_embedding.detach()
+        )
+
+    def _generate_mano_adjustments(self,time=None):
+        if time is not None:
+            if type(time) is not torch.Tensor:
+                time = torch.tensor([time], dtype=torch.int)
+            # even if time == time_frame, make new adjustments as nets changed
+            self.time_frame = time
+        if self.time_frame.device != self._mano_pose.device:
+            self.time_frame = self.time_frame.to(self._mano_pose.device)
+
+        self.time_embedding = self.adjustment_net.get_time_embedding(
+            frame=self.time_frame.detach(),
+            mano_pose=self._mano_pose.detach(),
+            mano_shape=self._mano_shape.detach(),
+            scale=self._mano_scale.detach(),
+            rotation=self._mano_rotation.detach(),
+            transl=self._mano_transl.detach(),
+        )
+
+        self.mano_adjustments = self.adjustment_net.get_mano_adjustments(self.time_embedding)
+
     def create_from_pcd(self, pcd: MANOPointCloud, spatial_lr_scale: float):
+
         self.point_cloud = pcd
         self.spatial_lr_scale = spatial_lr_scale
         pcd_alpha_shape = pcd.alpha.shape
+
+        self.mano_config = self.point_cloud.mano_model.config
+        self.adjustment_net = AdjustmentNet(self.mano_config).cuda()
+        self.warm_up_steps = self.mano_config.adjustment_warmup
 
         print("Number of faces: ", pcd_alpha_shape[0])
         print("Number of points at initialisation in face: ", pcd_alpha_shape[1])
@@ -101,6 +158,8 @@ class GaussianManoModel(GaussianModel):
         self.prepare_scaling_rot()
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        with torch.no_grad():
+            self.reload_mano_pose(self._mano_pose)
 
     def create_mano_params(self):
         """
@@ -111,9 +170,9 @@ class GaussianManoModel(GaussianModel):
         """
         self._mano_shape = self.point_cloud.mano_model_shape_init.requires_grad_(False)
         self._mano_pose = self.point_cloud.mano_model_pose_init.requires_grad_(False)
-        self._mano_transl =   nn.Parameter(self.point_cloud.mano_model_transl_init.requires_grad_(True))
+        self._mano_transl = nn.Parameter(self.point_cloud.mano_model_transl_init.requires_grad_(True))
         self._mano_rotation = nn.Parameter(self.point_cloud.mano_model_rot_init.requires_grad_(True))
-        self._mano_scale =    nn.Parameter(self.point_cloud.mano_model_scale_init.requires_grad_(True))
+        self._mano_scale = nn.Parameter(self.point_cloud.mano_model_scale_init.requires_grad_(True))
         self.faces = self.point_cloud.faces
 
         vertices_enlargement = (self.point_cloud.vertices_enlargement_init * torch.ones(1)).requires_grad_(True)
@@ -129,7 +188,7 @@ class GaussianManoModel(GaussianModel):
         the triangles forming the mesh.
         """
         _xyz = torch.matmul(
-            self.alpha,
+            self.alpha,  # was adjusted
             self.vertices[self.faces]
         )
         self._xyz = _xyz.reshape(
@@ -179,11 +238,13 @@ class GaussianManoModel(GaussianModel):
         s0 = eps * torch.ones_like(s1)
         scales = torch.concat((s0, s1, s2), dim=1).unsqueeze(dim=1)
         scales = scales.broadcast_to((*self.alpha.shape[:2], 3))
-
+        if 'scale' not in self.adjustments:
+            self.adjustments['scale'] = torch.zeros_like(self._scales).to(self._scales.device)
         self._scaling = torch.log(
             torch.nn.functional.relu(
                 torch.log2(torch.nn.functional.relu(self._vertices_enlargement)+1+eps)
-                * self._scales * scales.flatten(start_dim=0, end_dim=1)) + eps
+                * (self._scales + self.adjustments['scale'] * (self.warm_up/self.warm_up_steps))
+                * scales.flatten(start_dim=0, end_dim=1)) + eps
         )
 
         rotation = torch.stack((v0, v1, v2), dim=1).unsqueeze(dim=1)
@@ -210,14 +271,22 @@ class GaussianManoModel(GaussianModel):
         # self.alpha = self.alpha / self.alpha.sum(dim=-1, keepdim=True)
 
         """
-        self.alpha = self.update_alpha_func(self._alpha)
-
+        if 'alpha' not in self.adjustments:
+            # only on first load, xyz and scales are not yet set up
+            alpha_d = torch.zeros_like(self._alpha).to(self._alpha.device)
+            self.adjustments['alpha'] = torch.flatten(alpha_d,0,1)  # xyz, and scale have face x id collapsed
+        alpha_d = torch.reshape(self.adjustments['alpha'],self._alpha.shape)
+        self.alpha = self.update_alpha_func(self._alpha + alpha_d * (self.warm_up/self.warm_up_steps))
+        if 'scale' not in self.mano_adjustments:
+            # used only on model load
+            self._generate_mano_adjustments()
+        frac = self.warm_up / self.warm_up_steps
         vertices = self.point_cloud.mano_model(
-            shape=self._mano_shape,
-            pose=self._mano_pose,
-            transl=self._mano_transl,
-            scale=self._mano_scale,
-            rotation=self._mano_rotation
+            shape=self._mano_shape.detach()+self.mano_adjustments['mano_shape'] * frac,
+            pose=self._mano_pose.detach()+self.mano_adjustments['mano_pose'] * frac,
+            transl=self._mano_transl.detach()+self.mano_adjustments['transl'] * frac,
+            scale=self._mano_scale.detach()+self.mano_adjustments['scale'] * frac,
+            rotation=self._mano_rotation.detach()+self.mano_adjustments['rotation'] * frac,
         )
         self.vertices = self.point_cloud.transform_vertices_function(
             vertices,
@@ -228,18 +297,22 @@ class GaussianManoModel(GaussianModel):
     def training_setup(self, training_args):
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
-        lr_params = [ # TODO: set to mano
-            # {'params': [self._mano_shape], 'lr': training_args.mano_shape_lr, "name": "shape"},
+        lr_params = [
             {'params': [self._mano_scale], 'lr': training_args.mano_scale_lr, "name": "m_scale"},
-            # {'params': [self._mano_pose], 'lr': training_args.mano_pose_lr, "name": "pose"},
             {'params': [self._mano_rotation], 'lr':training_args.mano_rot_lr, "name": "m_rotation"},
             {'params': [self._mano_transl], 'lr': training_args.mano_transl_lr, "name": "transl"},
-            {'params': [self._vertices_enlargement], 'lr': training_args.vertices_enlargement_lr, "name": "vertices_enlargement"},
-            {'params': [self._alpha], 'lr': training_args.alpha_lr, "name": "alpha"},
+
+            {'params': [self._vertices_enlargement], 'lr': training_args.vertices_enlargement_lr,
+             "name": "vertices_enlargement"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
-            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+
+            {'params': [self._alpha], 'lr': training_args.alpha_lr, "name": "alpha"},
             {'params': [self._scales], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+
+            {'params': self.adjustment_net.parameters(), 'lr': training_args.adjustment_net_lr,
+             "name": "adjustment_net"}
         ]
 
         self.optimizer = torch.optim.Adam(lr_params, lr=0.0, eps=1e-15)
@@ -252,28 +325,26 @@ class GaussianManoModel(GaussianModel):
         self._save_ply(path)
 
         attrs = self.__dict__
-        flame_additional_attrs = [
+        mano_additional_attrs = [
             '_mano_scale', '_mano_rotation', '_mano_transl',
             '_vertices_enlargement', 'faces',
             'alpha', 'point_cloud',
         ]
 
         save_dict = {}
-        for attr_name in flame_additional_attrs:
+        for attr_name in mano_additional_attrs:
             save_dict[attr_name] = attrs[attr_name]
 
-        path_flame = path.replace('point_cloud.ply', 'flame_params.pt')
+        path_flame = path.replace('point_cloud.ply', 'mano_params.pt')
         torch.save(save_dict, path_flame)
 
     def load_ply(self, path):
         self._load_ply(path)
-        path_flame = path.replace('point_cloud.ply', 'flame_params.pt')
+        path_flame = path.replace('point_cloud.ply', 'mano_params.pt')
         params = torch.load(path_flame)
-        self._flame_shape = params['_flame_shape']
-        self._flame_exp = params['_flame_exp']
-        self._flame_pose = params['_flame_pose']
-        self._flame_neck_pose = params['_flame_neck_pose']
-        self._flame_trans = params['_flame_trans']
+        self._mano_scale = params['_mano_scale']
+        self._mano_rotation = params['_mano_rotation']
+        self._mano_transl = params['_mano_transl']
         self._vertices_enlargement = params['_vertices_enlargement']
         self.faces = params['faces']
         self.alpha = params['alpha']
@@ -297,7 +368,8 @@ class GaussianManoModel(GaussianModel):
             self._mano_shape,
             self._mano_rotation,
             self._mano_transl,
-            self._mano_scale
+            self._mano_scale,
+            self.adjustment_net.state_dict()
         )
 
     def restore(self, model_args, training_args):
@@ -317,9 +389,11 @@ class GaussianManoModel(GaussianModel):
          self._mano_shape,
          self._mano_rotation,
          self._mano_transl,
-         self._mano_scale
+         self._mano_scale,
+         adj_net_dict
          ) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+        self.adjustment_net.load_state_dict(adj_net_dict)

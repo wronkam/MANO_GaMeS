@@ -128,7 +128,7 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
         if "GaussianManoModel" in str(type(gaussians)):
-            if args.scale_loss:
+            if args.scale_loss != 0:
                 scale_loss_iters = gaussians.point_cloud.mano_model.scale_loss
                 loss_scale = torch.max(gaussians.get_scaling)#torch.log2(torch.nn.functional.relu(gaussians._vertices_enlargement) + 1 + 1e-8)
                 print(loss,loss_scale)
