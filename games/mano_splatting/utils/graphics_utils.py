@@ -14,11 +14,11 @@
 import numpy as np
 import torch
 from typing import NamedTuple
-
+# TODO: circular import
+#  from games.mano_splatting.MANO.MANO import MANO
 from torch import nn
 
 
-# TODO: MANOPointCloud
 class MANOPointCloud(NamedTuple):
     alpha: torch.Tensor
     points: torch.Tensor

@@ -297,8 +297,8 @@ class InterHandCamera:
         self.frames = sorted([extract_number(f) for f in os.listdir(self.image_path) if
                               os.path.isfile(os.path.join(self.image_path, f))])
         if mano_config.limit_frames is not None:
-            self.frames = self.frames[mano_config.limit_frames_center - mano_config.limit_frames:
-                                      mano_config.limit_frames_center + mano_config.limit_frames]
+            self.frames = self.frames[max(mano_config.limit_frames_center - mano_config.limit_frames, 0):
+                                      min(mano_config.limit_frames_center + mano_config.limit_frames, len(self.frames))]
             self.images = [f for f in self.images if extract_number(f) in self.frames]
             self.masks = [f for f in self.masks if extract_number(f) in self.frames]
 

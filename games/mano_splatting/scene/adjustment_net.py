@@ -1,3 +1,5 @@
+from typing import Dict
+
 import torch
 import torch.nn as nn
 from games.mano_splatting.MANO import ManoConfig
@@ -54,6 +56,7 @@ class AdjustmentNet(nn.Module):
         for name, net_config in config.adjustment_net.items():
             nets[name] = get_net(net_config)
         self.nets = nn.ModuleDict(nets)
+        self.schema = config.adjustment_net
 
     def get_time_embedding(self, frame, mano_pose, mano_shape, scale, rotation, transl):
         frame_in = frame.unsqueeze(0)  # [1] -> [B=1, 1]
@@ -97,11 +100,14 @@ class AdjustmentNet(nn.Module):
         return {'scale': scale_d, 'rotation': rotation_d, 'transl': transl_d,
                 'mano_shape': shape_d, 'mano_pose': pose_d}
 
-    def forward(self, alpha, scale, time_embedding):
+    def forward(self, values: Dict[str,torch.Tensor], time_embedding):
 
-        alpha = torch.flatten(alpha,0,1) # has size face x id x 3 not [face x id ] x 3
-        joint_input = torch.cat([alpha, scale], dim=-1)
-        joint_embedding = self.nets['joint_embedding'](joint_input)
+        input_keys = self.schema['joint_embedding']['input']
+        if 'alpha' in input_keys:
+            values['alpha'] = torch.flatten(values['alpha'],0,1)  # has size face x id x 3 not [face x id ] x 3
+        input_values = [values[key] for key in input_keys]
+        input_values = torch.cat(input_values, dim=-1)  # cat on 1 tensor does nothing so it is ok
+        joint_embedding = self.nets['joint_embedding'](input_values)
 
         time_embedding = time_embedding.repeat(joint_embedding.shape[0],1)
         main_input = torch.cat([joint_embedding, time_embedding], dim=-1)

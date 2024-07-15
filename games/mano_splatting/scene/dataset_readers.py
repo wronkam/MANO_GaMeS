@@ -11,6 +11,8 @@
 # This Games software is free for non-commercial, research and evaluation use
 #
 import os
+import re
+from glob import glob
 
 import numpy as np
 import torch
@@ -216,7 +218,10 @@ def readColmapManoInfo(path, images, eval, llffhold=8):
                                mano_config.reduction_max_distance, mano_config.reduction_theta,
                                mano_config.reduction_max_iters, mano_config.plot_reduction)
     if mano_config.load_gs_points is not None:
-        points = torch.tensor(fetchPly(mano_config.load_gs_points).points).to(mano_config.device)
+        last_saved = {int(re.findall('\d+',path)[0]):path
+                      for path in glob(os.path.join(mano_config.load_gs_points, 'iteration_*'))}
+        last_saved = last_saved[max(list(last_saved.keys()))].replace('/', os.sep)
+        points = torch.tensor(fetchPly(os.path.join(last_saved, 'point_cloud.ply')).points).to(mano_config.device)
 
     # sample points for matching
     perm = torch.randperm(points.shape[0])
@@ -226,11 +231,10 @@ def readColmapManoInfo(path, images, eval, llffhold=8):
 
     transl,rot,scale = match_pca(points,vertices)
 
-    mano_model.transl   = torch.nn.Parameter(transl,requires_grad=False)
-    mano_model.scale    = torch.nn.Parameter(scale ,requires_grad=False)
-    # TODO: remove the debug
-    mano_model.debug_scale    = scale.clone()
-    mano_model.rotation = torch.nn.Parameter(rot   ,requires_grad=False)
+    mano_model.transl = torch.nn.Parameter(transl, requires_grad=False)
+    mano_model.scale = torch.nn.Parameter(scale, requires_grad=False)
+    mano_model.debug_scale = scale.clone()
+    mano_model.rotation = torch.nn.Parameter(rot, requires_grad=False)
 
     vertices = mano_model()
     vertices = vertices.squeeze()
@@ -245,7 +249,6 @@ def readColmapManoInfo(path, images, eval, llffhold=8):
         plt.show()
 
     triangles = vertices[faces]
-    # TODO: get color as knn from colmap points if loaded
     if True:
         # Since this data set has no colmap data, we start with random points
         num_pts_each_triangle = mano_config.points_per_face
@@ -274,7 +277,7 @@ def readColmapManoInfo(path, images, eval, llffhold=8):
         pcd = MANOPointCloud(
             alpha=alpha,
             points=xyz.cpu(),
-            colors=SH2RGB(shs*0),  # TODO: knn from cloud colors
+            colors=SH2RGB(shs*0),
             normals=np.zeros((num_pts, 3)),
             mano_model=mano_model,
             faces=faces,

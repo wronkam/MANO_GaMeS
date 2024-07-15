@@ -35,6 +35,7 @@ class GaussianManoModel(GaussianModel):
         super().__init__(sh_degree)
         self.point_cloud: MANOPointCloud = None
         self._alpha = torch.empty(0)
+        self._adjustment_alpha = torch.empty(0)
         self.alpha = torch.empty(0)
         self.softmax = torch.nn.Softmax(dim=2)
 
@@ -48,7 +49,7 @@ class GaussianManoModel(GaussianModel):
             return x / x.sum(-1, keep_dim=True)
 
         # thanks to tactical ambiguity, m can be flat or same shaped tensor
-        def soft_margain_taylor_softmax(x: torch, m=None, eps: float = 1e-9) -> torch.Tensor:
+        def soft_margin_taylor_softmax(x: torch.Tensor, m=None, eps: float = 1e-9) -> torch.Tensor:
             if m is None:
                 m = x.var(-2, keepdim=True) ** (1 / 3)
             x1 = 1 + x + 0.5 * x ** 2 + eps / x.shape[-1]
@@ -57,7 +58,7 @@ class GaussianManoModel(GaussianModel):
             x = x / div
             return x / x.sum(-1, True)
 
-        self.update_alpha_func = lambda x: soft_margain_taylor_softmax(x=x)
+        self.update_alpha_func = lambda x: soft_margin_taylor_softmax(x=x)
 
         self.vertices = None
         self.faces = None
@@ -96,18 +97,21 @@ class GaussianManoModel(GaussianModel):
         self.warm_up = min(self.warm_up + 1, self.warm_up_steps)
 
     def _generate_gauss_adjustments(self):
-        if not self.mano_config.use_adjustment_net:
+        if not self.mano_config.use_adjustment_net or self.mano_config.chosen_variant in ['none', 'top']:
             return
         assert self.time_embedding is not None
+        input = {
+            'alpha': self._alpha.detach(),
+            'scale': self._scales.detach(),
+            'face': self.point_cloud.mano_model.get_vertice_embedding().detach(),
+        }
         self.adjustments = self.adjustment_net(
-            # face_id, alpha, scale, xyz, time_embedding
-            alpha=self._alpha.detach(),
-            scale=self._scales.detach(),
+            values=input,
             time_embedding=self.time_embedding.detach()
         )
 
     def _generate_mano_adjustments(self, time=None):
-        if not self.mano_config.use_adjustment_net:
+        if not self.mano_config.use_adjustment_net or self.mano_config.chosen_variant in ['none']:
             return
         if time is not None:
             if type(time) is not torch.Tensor:
@@ -135,6 +139,7 @@ class GaussianManoModel(GaussianModel):
         pcd_alpha_shape = pcd.alpha.shape
 
         self.mano_config = self.point_cloud.mano_model.config
+        print(self.mano_config)
         self.adjustment_net = AdjustmentNet(self.mano_config).cuda()
         self.warm_up_steps = self.mano_config.adjustment_warmup
 
@@ -156,7 +161,11 @@ class GaussianManoModel(GaussianModel):
 
         self.create_mano_params()
 
-        self._alpha = nn.Parameter(alpha_point_cloud.requires_grad_(True))  # check update_alpha
+        self._alpha = nn.Parameter(alpha_point_cloud.requires_grad_(True))
+        if self.mano_config.chosen_variant in ['ver+']:
+            alpha_shape = tuple(list(alpha_point_cloud.shape[:-1]) + [self.mano_config.per_face_embed])
+            adjustment_alpha = torch.zeros(alpha_shape).to(self._alpha.device)
+            self._adjustment_alpha = nn.Parameter(adjustment_alpha, requires_grad=True)
         self.update_alpha()
         self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
@@ -246,10 +255,20 @@ class GaussianManoModel(GaussianModel):
         scales = scales.broadcast_to((*self.alpha.shape[:2], 3))
         if 'scale' not in self.adjustments:
             self.adjustments['scale'] = copy_as_zeros(self._scales)
+
+        scale_update = self.adjustments['scale']
+
+        if (self.mano_config.chosen_variant in ['ver', 'ver+']
+                and scale_update.shape != self._scales.shape):
+            # scale is [face x 3] needs to be [face*gauss x 1], flatten alpha and dot product/length
+            adjustment_alpha = self._alpha if self.mano_config.chosen_variant == 'ver' else self._adjustment_alpha
+            adjustment_alpha = self.update_alpha_func(adjustment_alpha)
+            scale_update = scale_update.unsqueeze(1).repeat(1, adjustment_alpha.shape[1], 1).flatten(0, 1)
+            scale_update = torch.mean(scale_update * adjustment_alpha.flatten(0, -2), dim=-1).unsqueeze(-1)
         self._scaling = torch.log(
             torch.nn.functional.relu(
                 torch.log2(torch.nn.functional.relu(self._vertices_enlargement) + 1 + eps)
-                * (self._scales + self.adjustments['scale'] * (self.warm_up / self.warm_up_steps))
+                * (self._scales + scale_update * (self.warm_up / self.warm_up_steps))
                 * scales.flatten(start_dim=0, end_dim=1)) + eps
         )
 
@@ -279,8 +298,26 @@ class GaussianManoModel(GaussianModel):
         """
         if 'alpha' not in self.adjustments:
             # only on first load, xyz and scales are not yet set up
-            alpha_d = copy_as_zeros(self._alpha)
-            self.adjustments['alpha'] = torch.flatten(alpha_d, 0, 1)  # xyz, and scale have face x id collapsed
+            self.adjustments['alpha'] = torch.flatten(copy_as_zeros(self._alpha), 0, 1)
+            # xyz, and scale have face x id dimensions collapsed
+        if (self.mano_config.chosen_variant in ['ver', 'ver+'] and
+                torch.numel(self.adjustments['alpha']) != torch.numel(self._alpha)):
+            adjustment_alpha = self._alpha if self.mano_config.chosen_variant == 'ver' else self._adjustment_alpha
+            adjustment_alpha = self.update_alpha_func(adjustment_alpha)
+            # update_alpha.shape = [face x gs_per_face x n]
+            # adjustment has shape: [face x (3n)]
+            # update_alpha2 = [face x gs_per_face x 1 x n]
+            #  [face x 3*n] -> [face x 3 x n] -> [face x 1 x 3 x n] -> [face x gs_per_face x 3 x n] X update_alpha
+            #  -> [face x gs_per_face x 3] via dot product of last dims
+            # than flatten it to fit xyz and scale
+            n = self.mano_config.per_face_embed
+            self.adjustments['alpha'] = self.adjustments['alpha'].reshape(-1, 3, n)
+            self.adjustments['alpha'] = self.adjustments['alpha'].unsqueeze(1).repeat(1, self._alpha.shape[1], 1, 1)
+            assert adjustment_alpha.shape[-1] == n
+            self.adjustments['alpha'] = torch.mean(self.adjustments['alpha'] * adjustment_alpha.unsqueeze(-2), dim=-1)
+            self.adjustments['alpha'] = torch.flatten(self.adjustments['alpha'], 0, 1)
+            # to fit xyz, and scale shape to be consistent with gauss mode
+
         alpha_d = torch.reshape(self.adjustments['alpha'], self._alpha.shape)
         self.alpha = self.update_alpha_func(self._alpha + alpha_d * (self.warm_up / self.warm_up_steps))
         if 'scale' not in self.mano_adjustments:
@@ -325,7 +362,8 @@ class GaussianManoModel(GaussianModel):
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
 
             {'params': self.adjustment_net.parameters(), 'lr': training_args.adjustment_net_lr,
-             "name": "adjustment_net"}
+             "name": "adjustment_net"},
+            {'params': [self._adjustment_alpha], 'lr': training_args.update_alpha_lr, "name": "update_alpha"},
         ]
 
         self.optimizer = torch.optim.Adam(lr_params, lr=0.0, eps=1e-15)

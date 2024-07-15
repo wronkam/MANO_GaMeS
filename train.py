@@ -131,7 +131,6 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             if args.scale_loss != 0:
                 scale_loss_iters = gaussians.point_cloud.mano_model.scale_loss
                 loss_scale = torch.max(gaussians.get_scaling)#torch.log2(torch.nn.functional.relu(gaussians._vertices_enlargement) + 1 + 1e-8)
-                print(loss,loss_scale)
                 loss = loss + loss_scale * math.log2(1+1e-6+iteration/(opt.iterations*scale_loss_iters))
         loss.backward()
 
@@ -150,7 +149,7 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                             testing_iterations, scene, render, (pipe, background),gaussians,progress_bar)
             if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                progress_bar.write("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             # Densification
@@ -176,14 +175,14 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
             if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                progress_bar.write("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
         if hasattr(gaussians, 'update_alpha'):
             gaussians.update_alpha()
         if hasattr(gaussians, 'prepare_scaling_rot'):
             gaussians.prepare_scaling_rot()
-    if "GaussianManoModel" in str(type(gaussians)):
+    if "GaussianManoModel" in str(type(gaussians)) and False:
         gaussians: GaussianManoModel = gaussians
         annots = gaussians.point_cloud.mano_model.annots
         with torch.no_grad():
@@ -192,7 +191,7 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             bg = torch.rand((3), device="cuda") if opt.random_background else background
             sample_viewpoint_stack = scene.getTrainCameras()
 
-            samples_dir = os.path.join('samples')
+            samples_dir = os.path.join(scene.model_path,'samples')
             xd = 0
             for cam_idx in trange(len(sample_viewpoint_stack), desc='Cameras', leave=True):
                 if xd != 0:
@@ -300,19 +299,20 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
 
+        samples_path = os.path.join(scene.model_path,'samples')
         progress_bar.write(
-            f"Samples saved at: {os.path.join('samples',f'sample_{iteration}.jpg')}")
+            f"Samples saved at: {os.path.join(samples_path,f'sample_{iteration}.jpg')}")
         f, axarr = plt.subplots(1, 2)
         axarr[0].imshow(torch.clip(gt_image.clone().detach(),0,1).permute(1,2,0).cpu().numpy())
         axarr[1].imshow(torch.clip(image.clone().detach(),0,1).cpu().permute(1,2,0).numpy())
         f.suptitle(f"GT vs generated --- {iteration}")
-        if not os.path.exists('samples'):
-            os.makedirs('samples')
-        f.savefig(os.path.join('samples',f"sample_{iteration}.jpg"))
+        if not os.path.exists(samples_path):
+            os.makedirs(samples_path)
+        f.savefig(os.path.join(samples_path,f"sample_{iteration}.jpg"))
         fig = plt.figure()
         ax = fig.add_subplot(projection='3d')
         plt_scatter(gaussian.get_xyz.clone().detach(),ax,'r',0.02,30000)
-        plt.savefig(os.path.join('samples',f"sample_{iteration}_xyz.jpg"))
+        plt.savefig(os.path.join(samples_path,f"sample_{iteration}_xyz.jpg"))
         plt.close(fig)
         plt.close()
 

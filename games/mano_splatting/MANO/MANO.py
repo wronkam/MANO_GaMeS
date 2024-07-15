@@ -24,19 +24,18 @@ More information about FLAME is available at http://flame.is.tue.mpg.de.
 For questions regarding the PyTorch implementation please contact soubhik.sanyal@tuebingen.mpg.de
 """
 import json
-import os
-
-# Modified from smplx code [https://github.com/vchoutas/smplx] for FLAME
 
 import numpy as np
 import smplx
 import torch
 import torch.nn as nn
-import pickle
+from smplx.utils import to_tensor, to_np
+
 from games.mano_splatting.MANO.config import ManoConfig
-from smplx.lbs import lbs, batch_rodrigues, vertices2landmarks, find_dynamic_lmk_idx_and_bcoords
-from smplx.utils import Struct, to_tensor, to_np, rot_mat_to_euler
-from games.mano_splatting.utils.graphics_utils import get_vertices, transform_vertices
+from games.mano_splatting.utils.graphics_utils import get_vertices
+
+
+# Modified from smplx code [https://github.com/vchoutas/smplx] for FLAME
 
 
 class MANO(nn.Module):
@@ -122,6 +121,10 @@ class MANO(nn.Module):
                                                        requires_grad=False))
 
         self.scale_loss = config.scale_loss # not the prettiest bypass to train
+
+    def get_vertice_embedding(self):
+        # TODO: set some params, later add MANO to optimizer and makes sure NOTHING else gets gradient
+        return self.faces_tensor
 
 
     def forward(self, shape=None, pose=None, transl=None, scale = None, rotation = None):
