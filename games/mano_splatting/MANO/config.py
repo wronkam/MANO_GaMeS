@@ -21,7 +21,7 @@ class ManoConfig:
         if self.limit_frames <= 0:
             self.limit_frames = os.environ.get('LIMIT_FRAMES', None)
             self.limit_frames = None if self.limit_frames is None else int(self.limit_frames)
-            if self.limit_frames <= 0:
+            if self.limit_frames is not None and self.limit_frames <= 0:
                 self.limit_frames = None
         self.limit_frames_center = 143  # position of image in sorted by name order
 

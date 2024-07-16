@@ -164,7 +164,7 @@ class GaussianManoModel(GaussianModel):
         self._alpha = nn.Parameter(alpha_point_cloud.requires_grad_(True))
         if self.mano_config.chosen_variant in ['ver+']:
             alpha_shape = tuple(list(alpha_point_cloud.shape[:-1]) + [self.mano_config.per_face_embed])
-            adjustment_alpha = torch.zeros(alpha_shape).to(self._alpha.device)
+            adjustment_alpha = torch.ones(alpha_shape).to(self._alpha.device)
             self._adjustment_alpha = nn.Parameter(adjustment_alpha, requires_grad=True)
         self.update_alpha()
         self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
