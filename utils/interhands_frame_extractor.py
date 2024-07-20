@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import os
 import shutil
@@ -128,6 +129,7 @@ if __name__ == '__main__':
             torch.save(scores,pkl_path)
             bar.write(f'Frame: {frame}. It got {scores[frame]} images found by Colmap. '
                       f'The best was {max(scores.values())}')
+            gc.collect()
         max_score = max(scores.values())
         potentials = [key for key in scores.keys() if scores[key] >= max_score]
         print('Max score:', max_score)
@@ -142,7 +144,8 @@ if __name__ == '__main__':
             extract_mano(args.capture, args.frame, args.hand, args.save_path, mano_annotations)
             process_images(args.frame, args.save_path, args.images_path, args.masks_path)
             cmd = f'python {args.convert_path} -s {args.save_path}{colmap}'
-            os.system(cmd)
+            subprocess.run(cmd.split(' '), capture_output=True)  # suppresses outputs
+            # os.system(cmd)
         print('Done!')
 
     else:

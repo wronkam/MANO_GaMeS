@@ -10,6 +10,7 @@
 # The Gaussian-mesh-splatting is software based on Gaussian-splatting, used on research.
 # This Games software is free for non-commercial, research and evaluation use
 #
+import os
 
 from arguments import ParamGroup
 
@@ -31,7 +32,7 @@ class OptimizationParamsMesh(ParamGroup):
 
 class OptimizationParamsMano(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 80_000
+        self.iterations = int(os.environ.get('ITER','80000'))
         self.alpha_lr = 0.001
         self.update_alpha_lr = 0.001
         self.feature_lr = 0.0025

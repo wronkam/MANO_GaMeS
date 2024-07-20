@@ -5,11 +5,19 @@ import torch.nn as nn
 from games.mano_splatting.MANO import ManoConfig
 from games.mano_splatting.scene.embeddings import PositionalEncoding, GFFT1D
 
+
+class LogSquish(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sign(x) * torch.log2(1 + torch.abs(x))
+
+
 activation = {
+    'none': nn.Identity,
     'relu': nn.ReLU,
     'tanh': nn.Tanh,
     'sigmoid': nn.Sigmoid,
     'identity': nn.Identity,
+    'log_squish': LogSquish,
 }
 embeddings = {
     'PE': lambda size: PositionalEncoding(mapping_size=size, learnable=False),
@@ -42,7 +50,7 @@ def get_net(net_config) -> nn.Module:
             continue
         if net_config['bn']:
             layers.append(nn.BatchNorm1d(out_s))
-        layers.append(activation[net_config['activation']]())
+        layers.append(activation[net_config['activation'].lower()]())
         if net_config['dropout'] > 0.0:
             layers.append(nn.Dropout(net_config['dropout']))
     return nn.Sequential(*layers)
@@ -57,6 +65,7 @@ class AdjustmentNet(nn.Module):
             nets[name] = get_net(net_config)
         self.nets = nn.ModuleDict(nets)
         self.schema = config.adjustment_net
+        self.out_activation = activation[config.adjustment_net_out_activation.lower()]()
 
     def get_time_embedding(self, frame, mano_pose, mano_shape, scale, rotation, transl):
         frame_in = frame.unsqueeze(0)  # [1] -> [B=1, 1]
@@ -80,9 +89,9 @@ class AdjustmentNet(nn.Module):
         mano_adjustment = self.nets['mano_adjustment'](time_embedding)
 
         scale_idx = self.sizes['m_scale']
-        rotation_idx = scale_idx+self.sizes['m_rotation']
-        translation_idx = rotation_idx+self.sizes['m_transl']
-        shape_idx = translation_idx+self.sizes['m_shape']
+        rotation_idx = scale_idx + self.sizes['m_rotation']
+        translation_idx = rotation_idx + self.sizes['m_transl']
+        shape_idx = translation_idx + self.sizes['m_shape']
 
         (scale_d, rotation_d, transl_d, shape_d, pose_d) = (
             mano_adjustment[..., :scale_idx],
@@ -97,19 +106,23 @@ class AdjustmentNet(nn.Module):
         shape_d = self.nets['mano_shape_net'](shape_d)
         pose_d = self.nets['mano_pose_net'](pose_d)
 
-        return {'scale': scale_d, 'rotation': rotation_d, 'transl': transl_d,
+        out ={'scale': scale_d, 'rotation': rotation_d, 'transl': transl_d,
                 'mano_shape': shape_d, 'mano_pose': pose_d}
 
-    def forward(self, values: Dict[str,torch.Tensor], time_embedding):
+        for k,v in out.items():
+            out[k] = self.out_activation(v)
+        return out
+
+    def forward(self, values: Dict[str, torch.Tensor], time_embedding):
 
         input_keys = self.schema['joint_embedding']['input']
         if 'alpha' in input_keys:
-            values['alpha'] = torch.flatten(values['alpha'],0,1)  # has size face x id x 3 not [face x id ] x 3
+            values['alpha'] = torch.flatten(values['alpha'], 0, 1)  # has size face x id x 3 not [face x id ] x 3
         input_values = [values[key] for key in input_keys]
         input_values = torch.cat(input_values, dim=-1)  # cat on 1 tensor does nothing so it is ok
         joint_embedding = self.nets['joint_embedding'](input_values)
 
-        time_embedding = time_embedding.repeat(joint_embedding.shape[0],1)
+        time_embedding = time_embedding.repeat(joint_embedding.shape[0], 1)
         main_input = torch.cat([joint_embedding, time_embedding], dim=-1)
         out = self.nets['main'](main_input)
 
@@ -118,4 +131,7 @@ class AdjustmentNet(nn.Module):
         alpha_d = self.nets['alpha_net'](alpha_d)
         scale_d = self.nets['scale_net'](scale_d)
 
-        return {'alpha': alpha_d, 'scale': scale_d}
+        out = {'alpha': alpha_d, 'scale': scale_d}
+        for k,v in out.items():
+            out[k] = self.out_activation(v)
+        return out
