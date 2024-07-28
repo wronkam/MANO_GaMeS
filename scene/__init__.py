@@ -22,36 +22,62 @@ from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
+
 class CameraListWrapper:
     def __init__(self, cameraList):
-        self.cameraList = [cam for cam in cameraList if len(cam)>0]
+        self.cameraList = [cam for cam in cameraList if len(cam) > 0]
+        self.cameraListSizes = [len(cam) for cam in self.cameraList]
+        self.disabledCameras = {idx: cam for idx, cam in enumerate(cameraList) if len(cam) <= 0}
         self.order: List[int] = reduce(lambda a, b: a + b,  # flatten
                                        [[idx for _ in range(len(cam))] for idx, cam in enumerate(self.cameraList)])
+
     def __len__(self):
         return len(self.cameraList)
+
     def __iter__(self):
         return self.cameraList.__iter__()
-    def sample(self):
+
+    def sample(self, iteration=0):
         """
         Get random camera with probability balanced by remaining usages
         Returns:
         """
+        disabled_keys = list(self.disabledCameras.keys())
+        updated = False
+        for idx in disabled_keys:
+            cam = self.disabledCameras[idx]
+            # set to 10e15 for cameras so update_schedule is never even called
+            # (still implemented as a failsafe, does nothing)
+            if cam.next_update <= iteration:
+                cam.update_schedule(iteration)
+            if len(cam) > 0:
+                self.cameraList.append(cam)  # enable camera
+                self.cameraListSizes.append(0)  # triggers order extension
+                updated = True
+        if updated:
+            self.disabledCameras = {idx: cam for idx, cam in self.disabledCameras.items() if len(cam) == 0}
+        # if last known size of camera does not match the current add those entries to order
+        for idx, (cam, size) in enumerate(zip(self.cameraList, self.cameraListSizes)):
+            if len(cam) != size:  # add more copies current order and reshuffle if needed
+                self.order = self.order + [idx] * (len(cam) - size)
+                self.cameraListSizes[idx] = len(cam)
         if len(self.order) == 0:
             self.order: List[int] = reduce(lambda a, b: a + b,  # flatten
                                            [[idx for _ in range(len(cam))] for idx, cam in enumerate(self.cameraList)])
         sample = random.randint(0, len(self.order) - 1)
         sample = self.order.pop(sample)
         return self.cameraList[sample]
+
     def __getitem__(self, idx):
         item = self.cameraList[idx]
         return item
 
+
 class Scene:
+    gaussians: GaussianModel
 
-    gaussians : GaussianModel
-
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None,
-                 shuffle=False, # no point shuffling, there is random used when picking cameras up
+    def __init__(self, args: ModelParams, gaussians: GaussianModel, load_iteration=None,
+                 shuffle=False,  # no point shuffling, there is random used when picking cameras up
                  resolution_scales=[1.0]):
         """b
         :param path: Path to colmap scene main folder.
@@ -81,13 +107,14 @@ class Scene:
             else:
                 scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
-                print("Found transforms_train.json file, assuming Blender data set!")
-                scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
+            print("Found transforms_train.json file, assuming Blender data set!")
+            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
-            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply"),
+                                                                   'wb') as dest_file:
                 dest_file.write(src_file.read())
             json_cams = []
             camlist = []
@@ -112,22 +139,28 @@ class Scene:
                     self.threads = concurrent.futures.ThreadPoolExecutor(max_workers=self.mano_config.num_workers)
                 else:
                     self.threads = None
-                cam_loader = lambda a,b,c,d: loadInterHandCam(a,b,c,d,self.mano_config,self.threads)
+                cam_loader = lambda a, b, c, d: loadInterHandCam(a, b, c, d, self.mano_config, self.threads)
                 print("Loading InterHands Training Cameras")
-                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale,args,loader=cam_loader)
+                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras,
+                                                                                resolution_scale, args,
+                                                                                loader=cam_loader)
                 print("Loading InterHands Test Cameras")
-                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale,args,loader=cam_loader)
+                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras,
+                                                                               resolution_scale, args,
+                                                                               loader=cam_loader)
             else:
                 print("Loading Training Cameras")
-                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras,
+                                                                                resolution_scale, args)
                 print("Loading Test Cameras")
-                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras,
+                                                                               resolution_scale, args)
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
-                                                           "point_cloud",
-                                                           "iteration_" + str(self.loaded_iter),
-                                                           "point_cloud.ply"))
+                                                 "point_cloud",
+                                                 "iteration_" + str(self.loaded_iter),
+                                                 "point_cloud.ply"))
             self.gaussians.point_cloud = scene_info.point_cloud
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)

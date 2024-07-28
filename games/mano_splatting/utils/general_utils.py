@@ -10,11 +10,13 @@
 # The Gaussian-mesh-splatting is software based on Gaussian-splatting, used on research.
 # This Games software is free for non-commercial, research and evaluation use
 #
+import gc
 import json
 import os, re
 import queue
 import random
 import threading
+import warnings
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, SimpleQueue
@@ -205,25 +207,31 @@ def loadInterHandCam(args, id, cam_info, resolution_scale, mano_config, thread=N
     return InterHandCamera(cam_info=cam_info, mano_config=mano_config,
                            resolution=resolution, uid=id, data_device=args.data_device, thread=thread)
 
+
 def extract_number(string):
     return re.sub('[^0-9]', '', string)
+
 
 class Storage(ABC):
     @abstractmethod
     def __init__(self, size):
         pass
+
     @abstractmethod
     def __len__(self):
         pass
+
     @abstractmethod
     def get_next(self, lock=False):
         pass
+
     @abstractmethod
-    def store(self,data):
+    def store(self, data):
         pass
 
+
 class ConstantStorage(Storage):
-    def __init__(self,size):
+    def __init__(self, size):
         self.storage = []
         # synchronised queue, infinite max size
         self.size = size
@@ -235,6 +243,9 @@ class ConstantStorage(Storage):
     def get_next(self, lock=False):
         if self.iter >= len(self.storage):
             self.iter = 0
+        if len(self.storage) == 0:
+            warnings.warn('get_next of an empty storage unit was called')
+            return None, False
         data = self.storage[self.iter]
         self.iter += 1
         return data, True
@@ -262,7 +273,28 @@ class QueueStorage(Storage):
         return data, True
 
     def store(self, data):
-        self.storage.put(data)
+        self.storage.put(data, block=True)
+
+
+class AtomicCounter:
+    def __init__(self, cv=None):
+        # intended use is main thread sets it to some value
+        # (assumes it is zero and none wants to decrease it at the time)
+        self.cv = cv  # proxy for associated conditional variable
+        self.counter = 0
+        self.lock = threading.Lock()
+
+    def set(self, value):
+        with self.lock:
+            assert self.counter == 0
+            self.counter = value
+
+    def decrease(self):
+        with self.lock:
+            self.counter -= 1
+
+    def get_value(self):
+        return self.counter
 
 
 # noinspection SpellCheckingInspection
@@ -279,105 +311,118 @@ class InterHandCamera:
 
         self.annotation = os.path.join(mano_config.InterHands_annots_path)
         self.capture = extract_number(self.mano_config.InterHands_keys[1])  # captureX with X in [0..7]
-        size = mano_config.preload_size
+
+        cv = threading.Condition()
+        self.job_counter = AtomicCounter(cv)
         self.thread = thread
 
         camera_name = cam_info.image_name
         self.camera_name = camera_name
+
+        with open(self.annotation, 'r') as f:  # will slow down init, won't impact memory
+            annots = json.load(f)
+        annot_frmes = sorted(list(annots[str(self.capture)].keys()))
+        del annots
+        gc.collect()
+
+        annot_frmes = [extract_number(x) for x in annot_frmes]  # str
+        annot_frmes = [x for x in annot_frmes
+                       if self.mano_config.first_capture <= int(x) <= self.mano_config.last_capture]
+
+        self.all_frames_idx = {x: t for t, x in enumerate(annot_frmes)}  # gives global index of frame
+        self.all_frames = annot_frmes  # gives frame by index
+
         self.mask_path = os.path.join(
             *([self.mano_config.InterHands_masks_path] + mano_config.InterHands_keys + [f'cam{camera_name}']))
-        self.masks = [f for f in os.listdir(self.mask_path) if os.path.isfile(os.path.join(self.mask_path, f))]
+        self.masks = {extract_number(f): f for f in os.listdir(self.mask_path)
+                      if (os.path.isfile(os.path.join(self.mask_path, f))
+                          and extract_number(f) in self.all_frames)}
 
         self.image_path = os.path.join(
             *([self.mano_config.InterHands_images_path] + mano_config.InterHands_keys + [f'cam{camera_name}']))
-        self.images = [f for f in os.listdir(self.image_path) if os.path.isfile(os.path.join(self.image_path, f))
-                       and (extract_number(f) in [extract_number(v) for v in
-                                                  self.masks])]  # images are jpg and masks are png
+        self.images = {extract_number(f): f for f in os.listdir(self.image_path)
+                       if os.path.isfile(os.path.join(self.image_path, f))
+                       and (extract_number(f) in self.masks.keys())}  # images are jpg and masks are png
+        # assuemes all cam dirs have all images
+        self.frames = []
+        self.schedule = self.mano_config.camera_schedule
+        self.schedule = {time: camera_list for time, camera_list in self.schedule.items() if len(camera_list) > 0}
+        self.next_update = -1
+        self.index_provider = []  # inf size, resupplied on frames added with update_schedule and when empty from frames
+        self.update_schedule(0)  # sets frames as a list of frames that were enabled
+        # takes frame_idx from schedule and checks if all_frames[frame_idx] is in masks key
 
-        self.frames = sorted([extract_number(f) for f in os.listdir(self.image_path) if
-                              os.path.isfile(os.path.join(self.image_path, f))])
-        if mano_config.limit_frames is not None:
-            self.frames = self.frames[max(mano_config.limit_frames_center - mano_config.limit_frames, 0):
-                                      min(mano_config.limit_frames_center + mano_config.limit_frames, len(self.frames))]
-            self.images = [f for f in self.images if extract_number(f) in self.frames]
-            self.masks = [f for f in self.masks if extract_number(f) in self.frames]
-
-        self.frames = {name: t for t, name in enumerate(self.frames)}
-        self.index_provider = []  # inf size
-        self.size = size
         if mano_config.load_all_images:
-            self.size = len(self.images)
+            self.size = len(self.masks)
             self.storage = ConstantStorage(self.size)
         else:
+            self.size = mano_config.preload_size
             self.storage = QueueStorage(self.size)
-        if len(self.images)>0:
+        if len(self.frames) > 0:
             self.preload(-1)  # for const it will load all now, and nothing later
 
     def __len__(self):
-        return len(self.images)
+        return len(self.frames)
 
     def preload(self, num=1):
-        if num <= 0:
-            num = max(0, self.size - len(self.storage))  # constant storage will be loaded once !!!
-        # print(self.camera_name,num, len(self.storage),len(self.index_provider))
-        for _ in range(num):
-            idx = self.get_index()
-            name = extract_number(self.images[idx])
-            # print('spawning',self.camera_name,name)
-            if self.thread is None:
-                InterHandCamera.load_from_mem(
-                    storage=self.storage,
-                    frame=self.frames[name],
-                    image_path=os.path.join(self.image_path, self.images[idx]),
-                    mask_path=os.path.join(self.mask_path, self.masks[idx]),
-                    resolution=self.resolution,
-                    uid=self.uid,
-                    cam_info=self.cam_info,
-                    data_device=self.data_device,
-                    name=name,
-                    is_rhand=self.mano_config.mano_is_rhand,
-                    capture=self.capture,
-                    annotation_path=self.annotation,
-                    cam_name=self.camera_name
-                )
-            else:
-                self.thread.submit(InterHandCamera.load_from_mem,
-                                   storage=self.storage,
-                                   frame=self.frames[name],
-                                   image_path=os.path.join(self.image_path, self.images[idx]),
-                                   mask_path=os.path.join(self.mask_path, self.masks[idx]),
-                                   resolution=self.resolution,
-                                   uid=self.uid,
-                                   cam_info=self.cam_info,
-                                   data_device=self.data_device,
-                                   name=name,
-                                   is_rhand=self.mano_config.mano_is_rhand,
-                                   capture=self.capture,
-                                   annotation_path=self.annotation,
-                                   cam_name=self.camera_name
-                                   )
+        with self.job_counter.cv:
+            while self.job_counter.get_value() > 0:
+                # if there are jobs currently loaded for this camera, wait for them to finish before scheduling new ones
+                self.job_counter.cv.wait()
+            if num <= 0:
+                num = max(0, min(self.size - len(self.storage), len(self.frames)))
+                # constant storage extends index provider only with new frames -> it will add new frames to const jit
+            self.job_counter.set(num)
+            for num_idx in range(num):
+                idx = self.get_index()
+                frame = self.frames[idx]
+                name = frame
+                global_frame_idx = self.all_frames_idx[frame]
+                kwargs = {
+                    'storage': self.storage,
+                    'frame_idx': global_frame_idx,
+                    'image_path': os.path.join(self.image_path, self.images[frame]),
+                    'mask_path': os.path.join(self.mask_path, self.masks[frame]),
+                    'resolution': self.resolution,
+                    'uid': self.uid,
+                    'cam_info': self.cam_info,
+                    'data_device': self.data_device,
+                    'name': name,
+                    'is_rhand': self.mano_config.mano_is_rhand,
+                    'capture': self.capture,
+                    'annotation_path': self.annotation,
+                    'cam_name': self.camera_name,
+                    'job_counter': self.job_counter,
+                }
+                if self.thread is None:
+                    InterHandCamera.load_from_mem(**kwargs)
+                else:
+                    self.thread.submit(InterHandCamera.load_from_mem, **kwargs)
 
-    def next(self):
+
+    def next(self, iteration=0):
+        self.update_schedule(iteration)  # updates index provider if new frames get added (used in preload -> get_index)
         data, success = self.storage.get_next(lock=False)
         while not success:
             # preload and wait for it if Q is empty
             self.preload(1)
             data, success = self.storage.get_next(lock=True)
-        self.preload(-1)  # replenish up to self.size, does nothing for once loaded const storage
+            self.preload(-1)  # replenish up to self.size, does nothing for once loaded const storage
         camera, frame, mano_pose = data
         if self.data_device != self.cuda_device:
             camera = camera.to(self.cuda_device)
         return camera, mano_pose, frame
 
     @staticmethod
-    def load_from_mem(storage, frame,
+    def load_from_mem(storage, frame_idx,
                       image_path, mask_path, resolution, uid, cam_info, data_device,
-                      name, is_rhand, capture, annotation_path,cam_name=None):
-        # print(cam_name,name,'start')
+                      name, is_rhand, capture, annotation_path, job_counter, cam_name=None):
         mano_pose = InterHandCamera.get_mano(name, is_rhand, annotation_path, capture)
         camera = InterHandCamera.get_cam(image_path, mask_path, resolution, uid, cam_info, data_device)
-        storage.store((camera, frame, mano_pose))
-        # print(cam_name,name,'end')
+        storage.store((camera, frame_idx, mano_pose))
+        with job_counter.cv:
+            job_counter.decrease()
+            job_counter.cv.notify()
 
     @staticmethod
     def get_cam(image_path, mask_path, resolution, uid, cam_info, data_device):
@@ -393,12 +438,10 @@ class InterHandCamera:
                       image=gt_image, gt_alpha_mask=loaded_mask,
                       image_name=cam_info.image_name, uid=id, data_device=data_device)
 
-
     def shuffle(self):
-        order = list(range(len(self.images)))
+        order = list(range(len(self.frames)))
         random.shuffle(order)
         self.index_provider = order + self.index_provider
-        # print(self.camera_name,'shuffle',len(self.index_provider))
 
     @staticmethod
     def get_mano(name, is_rhand, annotation_path, capture):
@@ -410,5 +453,26 @@ class InterHandCamera:
     def get_index(self):
         if len(self.index_provider) == 0:
             self.shuffle()
-        # print(self.camera_name,'get',len(self.index_provider))
         return self.index_provider.pop(-1)
+
+    def update_schedule(self, iteration):
+        if iteration < self.next_update:
+            return
+        timestamps = sorted([t for t in self.schedule.keys() if t <= iteration])
+        new_frames = []
+        for timestamp in timestamps:
+            frame_list = self.schedule[timestamp]
+            for frame_idx in frame_list:
+                if (0 <= frame_idx < len(self.all_frames)) and self.all_frames[frame_idx] in self.masks.keys():
+                    new_frames.append(self.all_frames[frame_idx])
+        if len(new_frames) > 0:
+            self.schedule = {k: v for k, v in self.schedule.items() if k not in timestamps}
+            self.index_provider = [len(self.frames) + i for i, _ in enumerate(new_frames)] + self.index_provider
+            # add new frame indexes to index_provider (list of next frames to process) and reshuffle
+            random.shuffle(self.index_provider)
+            self.frames += new_frames
+            # update next_update
+            if len(self.schedule.keys()) == 0:
+                self.next_update = 10e15
+            else:
+                self.next_update = min(list(self.schedule.keys()))

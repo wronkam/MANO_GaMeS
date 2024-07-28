@@ -17,18 +17,43 @@ class ManoConfig:
             "./data/InterHand/5/annotations/test/InterHand2.6M_test_MANO_NeuralAnnot.json")
         self.InterHands_keys: List[str] = ['test', 'Capture0', 'ROM04_RT_Occlusion']
 
+        self.first_capture = 17746  # used to sync frame numbers between cameras with different num of frames
+        self.last_capture = 18652
+
         self.limit_frames = 0  # if <=0 or None, all are loaded, otherwise take +-lim_fr around lim_fr_center
+        self.limit_frames_center = 77  # position of image in sorted by name order
         if self.limit_frames <= 0:
             self.limit_frames = os.environ.get('LIMIT_FRAMES', None)
             self.limit_frames = None if self.limit_frames is None else int(self.limit_frames)
             if self.limit_frames is not None and self.limit_frames <= 0:
                 self.limit_frames = None
-        self.limit_frames_center = 143  # position of image in sorted by name order
 
         self.load_all_images = True  # if not uses parallel preloading with following params
         self.load_on_gpu = False  # if not images are loaded to RAM and moved to gpu just for execution
         self.num_workers = 48  # num of threads in ThreadPool used for image preloading
-        self.preload_size = 12  # how many images are buffered for future iterations for each camera
+        self.preload_size = 16  # how many images are buffered for future iterations for each camera
+
+        enable_custom_camera_scheduling = True
+        camera_scheduling_interval = 2500
+        camera_scheduling_mode = 'neighbour'
+        camera_number = 152  # how many
+        self.camera_schedule: Dict[int, List[int]] = {0: [i for i in range(camera_number)]}  # use all from iteration 0
+        # format {(iteration>=0 : int) : ([list of camera ids>=0: int]) incorrect camera_id are ignored
+        # camera id denotes number of camera in sorted list of captures that are first_capture <= x <= last_capture
+        if enable_custom_camera_scheduling:
+            if camera_scheduling_mode == 'neighbour':
+                # start with one camera at limit_frames_center and enable 1 from left and right each interval
+                self.camera_schedule = {0: [self.limit_frames_center]}
+                iters = max(camera_number - self.limit_frames_center, self.limit_frames_center) + 3
+                for i in range(1, iters):
+                    self.camera_schedule[i * camera_scheduling_interval] = [self.limit_frames_center - i,
+                                                                            self.limit_frames_center + i]
+        if self.limit_frames is not None and self.limit_frames > 0:
+            for k, v in self.camera_schedule.items():
+                self.camera_schedule[k] = [cam for cam in v if (
+                        self.limit_frames_center - self.limit_frames <=
+                        cam <= self.limit_frames_center + self.limit_frames)]
+        self.camera_schedule = {t: frame_list for t, frame_list in self.camera_schedule.items() if len(frame_list) > 0}
 
         self.mano_is_rhand = True
         self.annot_path = None
@@ -63,7 +88,7 @@ class ManoConfig:
         self.use_adjustment_net: bool = True
         self.chosen_variant = None
         if self.chosen_variant is None:
-            self.chosen_variant = os.environ.get('MANO_VARIANT','ver')
+            self.chosen_variant = os.environ.get('MANO_VARIANT', 'ver')
         """
             none - no updates
             top - only mano (vertices) are updated
@@ -73,7 +98,7 @@ class ManoConfig:
         """
         ver_plus_size: int = 6
 
-        self.adjustment_warmup = int(os.environ.get('ADJUSTMENT_WARMUP','40000'))
+        self.adjustment_warmup = int(os.environ.get('ADJUSTMENT_WARMUP', '40000'))
         embed_size: Dict[str, int] = {
             'pose_shape': 84,
             'geo': 32,
@@ -84,7 +109,7 @@ class ManoConfig:
             'm_scale': 32,
             'm_shape': 32,
             'm_pose': 96,
-            'time': 180,
+            'time': 360,
             'joint': 2 * 64,
             'alpha': 32,
             'scale': 32,

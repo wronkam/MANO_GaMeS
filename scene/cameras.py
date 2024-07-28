@@ -65,9 +65,13 @@ class Camera(nn.Module):
         self.register_parameter('camera_center',
                                 nn.Parameter(self.world_view_transform.inverse()[3, :3],
                                              requires_grad=False))
+        self.next_update = 10e15
 
     def __len__(self):
         return 1
+
+    def update_schedule(self,iteration = 0):
+        return
 
 
 class MiniCam:

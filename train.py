@@ -12,6 +12,7 @@
 import os
 
 import cv2
+import matplotlib
 import numpy as np
 import torch
 from random import randint
@@ -106,11 +107,11 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
         if len(viewpoint_stack) == 0:
             # works like next epoch
             viewpoint_stack = scene.getTrainCameras()
-        viewpoint_cam = viewpoint_stack.sample()
+        viewpoint_cam = viewpoint_stack.sample(iteration)  # empty camera will not be called
         if args.gs_type == 'gs_mano':
             if args.interhands:
                 # get frame from camera
-                viewpoint_cam, mano_pose, time_frame = viewpoint_cam.next()
+                viewpoint_cam, mano_pose, time_frame = viewpoint_cam.next(iteration)
                 gaussians.reload_mano_pose(mano_pose,time_frame)
 
         # Render
@@ -269,7 +270,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 for idx,viewpoint in enumerate(config['cameras']):
                     if args.gs_type == 'gs_mano':
                         if args.interhands:
-                            viewpoint, mano_pose, time_frame = viewpoint.next()
+                            viewpoint, mano_pose, time_frame = viewpoint.next(iteration)
                             scene.gaussians.reload_mano_pose(mano_pose,time_frame)
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
@@ -321,6 +322,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
 if __name__ == "__main__":
     # Set up command line argument parser
+    matplotlib.use('Agg')
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
