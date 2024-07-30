@@ -14,6 +14,7 @@
 from scene.dataset_readers import (
     readColmapSceneInfo,
     readNerfSyntheticInfo,
+    readInterHandInfo
 )
 from games.mano_splatting.scene.dataset_readers import (
     readColmapManoInfo
@@ -23,4 +24,5 @@ sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Colmap_MANO": readColmapManoInfo,
     "Blender": readNerfSyntheticInfo,
+    "InterHand": readInterHandInfo
 }
