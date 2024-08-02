@@ -23,6 +23,8 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 
+import cv2
+
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -258,6 +260,191 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
     return scene_info
+
+
+def _get_int_from_str(_str):
+    return int("".join([x for x in _str if x.isnumeric()]))
+
+
+def normalize(x):
+    return x / np.linalg.norm(x)
+
+
+def viewmatrix(z, up, pos):
+    vec2 = normalize(z)
+    vec1_avg = up
+    vec0 = normalize(np.cross(vec1_avg, vec2))
+    vec1 = normalize(np.cross(vec2, vec0))
+    m = np.stack([vec0, vec1, vec2, pos], 1)
+    return m
+
+
+def poses_avg(poses):
+    hwf = poses[0, :3, -1:]
+
+    center = poses[:, :3, 3].mean(0)
+    vec2 = normalize(poses[:, :3, 2].sum(0))
+    up = poses[:, :3, 1].sum(0)
+    c2w = np.concatenate([viewmatrix(vec2, up, center), hwf], 1)
+
+    return c2w
+
+
+def recenter_poses(poses):
+    poses_ = poses + 0
+    bottom = np.reshape([0,0,0,1.], [1,4])
+    c2w = poses_avg(poses)
+    c2w = np.concatenate([c2w[:3,:4], bottom], -2)
+    bottom = np.tile(np.reshape(bottom, [1,1,4]), [poses.shape[0],1,1])
+    poses = np.concatenate([poses[:,:3,:4], bottom], -2)
+
+    poses = np.linalg.inv(c2w) @ poses
+    poses_[:,:3,:4] = poses[:,:3,:4]
+    poses = poses_
+    return poses
+
+
+def readCamerasFromTransformsInterHand(path_to_set: str, white_background: bool, subject: str = "test/Capture0/ROM04_RT_Occlusion", frame_no: int = 0) -> list:    
+    path_to_set = Path(path_to_set)
+    phase = subject.split('/')[0]
+    capture = _get_int_from_str(subject.split('/')[1])
+    
+    images_dir = Path(path_to_set, "images", subject)
+    cameras_json_path = Path(path_to_set.parent, "annotations", phase, "InterHand2.6M_" + phase + "_camera.json")
+    masks_dir = Path(path_to_set, "masks_removeblack", subject)
+    
+    all_cam_names = [x.stem for x in masks_dir.glob("*") if x.is_dir()]
+    
+    wanted_mask_name = None
+    bg = np.array([[[1,1,1]]]) if white_background else np.array([[[0, 0, 0]]])
+    
+    with open(cameras_json_path, "r") as f:
+        cameras = json.load(f)
+    
+    cam_infos = []
+    adjustment = np.diag(np.array([1, -1, -1]))
+    
+    cam_names_with_mask = []
+    img_paths = []
+    poses = []
+    images = []
+    fovxs = []
+    fovys = []
+    
+    for cam_name in all_cam_names:
+        mask_cam_path = Path(masks_dir, cam_name)
+        if wanted_mask_name is None:
+            mask_names = sorted([x.name for x in mask_cam_path.glob("*png")])
+            wanted_mask_name = mask_names[frame_no]
+        mask_path = Path(masks_dir, cam_name, wanted_mask_name)
+        try:
+            mask = np.array(Image.open(mask_path), dtype=np.float32)[:, :, 0] / 255
+        except FileNotFoundError:
+            continue
+        img_path = Path(images_dir, cam_name, wanted_mask_name).with_suffix(".jpg")
+        img_paths.append(img_path)
+        img = np.array(Image.open(img_path), dtype=np.float32)
+        cam_id = _get_int_from_str(cam_name)
+        
+        cam_names_with_mask.append(cam_name)
+        cam_id = _get_int_from_str(cam_name)
+        init_T, R = np.array(cameras[str(capture)]['campos'][str(cam_id)], dtype=np.float32), np.array(cameras[str(capture)]['camrot'][str(cam_id)], dtype=np.float32)
+        focal, princpt = np.array(cameras[str(capture)]['focal'][str(cam_id)], dtype=np.float32), np.array(cameras[str(capture)]['princpt'][str(cam_id)], dtype=np.float32)
+
+        delta_x = (img.shape[1] / 2) - princpt[0]
+        delta_y = (img.shape[0] / 2) - princpt[1]
+        trans_matrix = np.eye(3, dtype=np.float32)[:2, :]
+        trans_matrix[0, 2] = delta_x
+        trans_matrix[1, 2] = delta_y
+        
+        mask_rgb = np.repeat(mask[:, :, None], 3, -1)
+        trans_mask = cv2.warpAffine(
+            mask_rgb,
+            trans_matrix,
+            (img.shape[1], img.shape[0])
+        )
+        trans_img = cv2.warpAffine(
+            img,
+            trans_matrix,
+            (img.shape[1], img.shape[0])
+        )
+        
+        masked_img = (trans_img * trans_mask + 255 * bg * (1 - trans_mask)).astype(np.float32)
+        masked_img = Image.fromarray(masked_img.astype(dtype=np.byte), "RGB")
+        images.append(masked_img)
+        
+        fovxs.append(2 * np.arctan(img.shape[1] / (2 * focal[0])))
+        fovys.append(2 * np.arctan(img.shape[0] / (2 * focal[1])))
+        
+        R = np.array(R)
+        R = np.matmul(adjustment, R).T
+        c2w = np.eye(4)
+        c2w[:3, :3] = R
+        c2w[:3, 3] = init_T
+        poses.append(c2w)
+    poses = np.stack(poses)
+    poses = recenter_poses(poses)
+    
+    for idx, (img_path, pose, img, fovx, fovy) in enumerate(zip(img_paths, poses, images, fovxs, fovys)):
+        c2w = pose
+        c2w[:3, 1:3] *= -1
+        w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])
+        T = w2c[:3, 3]
+        
+        cam_infos.append(
+            CameraInfo(
+                uid=idx,
+                R=R,
+                T=T,
+                FovY=fovy,
+                FovX=fovx,
+                image=img,
+                image_path=img_path,
+                image_name=img_path.name,
+                width=img.width,
+                height=img.height
+            )
+        )
+    return cam_infos
+
+
+def readInterHandInfo(path_to_set: Path, white_background: bool, frame_no: int = 0, val_perc: float = 0.1):
+    subject = "test/Capture0/ROM04_RT_Occlusion"
+    
+    cam_infos = readCamerasFromTransformsInterHand(path_to_set, white_background, subject, frame_no)
+    
+    nerf_normalization = getNerfppNorm(cam_infos)
+    
+    ply_path = os.path.join(path_to_set, f"{'_'.join(subject.split('/'))}_{frame_no}_points3d.ply")
+    # Since this data set has no colmap data, we start with random points
+    num_pts = 600_000
+    print(f"Generating random point cloud ({num_pts})...")
+
+    init_pos = np.array([0., 0., -300.], dtype=np.float32)
+    
+    cube_size = 200
+    xyz = np.random.random((num_pts, 3)) * cube_size - (cube_size / 2) + init_pos
+    shs = np.random.random((num_pts, 3)) / 255.0
+    pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+    
+    storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    no_of_test_cams = int(len(cam_infos) * val_perc)
+    test_cams = cam_infos[:no_of_test_cams]
+    train_cams = cam_infos[no_of_test_cams:]
+    
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cams,
+                           test_cameras=test_cams,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
