@@ -8,6 +8,7 @@ Done:
 - multithread camera preloading enebling training on large datasets without whole dataset cashing or image loading lag
 - visualization tools for camera alignment
 - InterHands dataset camera realignment 
+
 ToDo:
 - addition (and potentially creation) of zero-shot hand pose estimator to remove reliance on noisy camera information
 - temporal model update blending
